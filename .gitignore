@@ -39,3 +39,9 @@ venv/
 
 # Logs
 *.log
+.ssh/
+.ipynb_checkpoints/
+.bash_history
+.profile
+.profile
+.zshrc
