@@ -1,0 +1,41 @@
+# Data Folders
+drive_downloads/
+drive_data/
+seglst_fixes_and_rttm_generation/output_data/
+segment_quality_report_gen/reports_approved/
+segment_quality_report_gen/reports_fixed/
+
+# File Extensions (Data/Audio)
+*.wav
+*.rttm
+*.json
+*.md
+# Exception: Keep documentation MD files
+!README.md
+!GEMINI.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# System/Environment
+.gemini/
+.config/
+.cache/
+.local/
+.npm/
+.ipython/
+.jupyter/
+.docker/
+.lastactive
+
+# Logs
+*.log
