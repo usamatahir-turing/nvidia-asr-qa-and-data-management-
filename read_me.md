@@ -2,7 +2,7 @@ GCS Instance: [https://console.cloud.google.com/agent-platform/workbench/locatio
 
 For any access issues, here’s the thread with DevOps: [Slack Thread](https://turing-company.slack.com/archives/C02TKAK7Q83/p1779742376834579?thread_ts=1778572701.736009&cid=C02TKAK7Q83)
 
-# Mirror Drive {#mirror-drive}
+# Mirror Drive
 
 First step should be to mirror the drive folder [Files for Gecko](https://drive.google.com/drive/u/0/folders/1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1)
 
@@ -76,6 +76,12 @@ This will upload all the RTTMs, SegLists, from *seglst\_fixes\_and\_rttm\_genera
 
 # Segment Annotation Quality
 
+The following checks are currently in place and should be present in each generated report:
+- **Boundary failures** — a segment’s start or end is off from where the speaker actually starts/stops talking by more than **100 ms**.
+- **Silence failures** — there is a stretch of silence longer than **200 ms** *inside* a segment. The segment should be split there.
+- **Uncovered audio** — audio is present on this speaker’s channel, but no segment is annotated. A new segment should be added.
+- **No signal** — a segment exists in the annotations, but no audible audio was found in that time range on this channel. The segment may be on the wrong channel, at the wrong time, or shouldn’t exist.
+
 ## Report Generation
 
 We want to run the segmentation quality reports at two stages
@@ -129,4 +135,3 @@ python push_reports_to_drive.py --variant approved
 The data will be pushed to the relevant subfolder in the drive [Files for Gecko](https://drive.google.com/drive/folders/1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1)
 
 *Note: It’s important that for any uploading of data, the folder is in a Shared Drive location (not shared with me)*
-
