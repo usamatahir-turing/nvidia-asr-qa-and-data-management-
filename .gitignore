@@ -45,3 +45,5 @@ venv/
 .profile
 .profile
 .zshrc
+*.JSON
+*.Json

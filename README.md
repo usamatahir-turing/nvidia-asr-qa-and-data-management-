@@ -135,3 +135,30 @@ python push_reports_to_drive.py --variant approved
 The data will be pushed to the relevant subfolder in the drive [Files for Gecko](https://drive.google.com/drive/folders/1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1)
 
 *Note: It’s important that for any uploading of data, the folder is in a Shared Drive location (not shared with me)*
+
+# AssemblyAI or LT JSONs to SegLists
+
+This workflow is used to convert transcripts from AssemblyAI or the Labeling Tool (LT) into standardized SegList JSON files.
+
+### 1. Download AssemblyAI JSONs
+If you are working with AssemblyAI transcripts, first sync the latest JSON files from the Drive folder [AssemblyAI Transcripts](https://drive.google.com/drive/u/0/folders/1wceeL4NRLTXg57EIgV5peQPuDCBEthzl):
+
+```shell
+python assemblyai_or_LT_jsons_to_seglsts/download_jsons_from_drive.py
+```
+* This replicates only the immediate parent folder of each `.json` file into `assemblyai_or_LT_jsons_to_seglsts/assembly_ai_jsons`.
+* It uses "updates only" logic to download new/changed files and clean up orphans.
+
+### 2. Prepare LT JSONs
+If the data is from the Labeling Tool, ensure the relevant JSON files are placed in the directory:
+`assemblyai_or_LT_jsons_to_seglsts/lt_jsons/`
+
+### 3. Generate SegLists
+Once the source JSONs are ready (either in `assembly_ai_jsons/` or `lt_jsons/`), run the generator script:
+
+```shell
+cd assemblyai_or_LT_jsons_to_seglsts/
+python seglst_gen.py
+```
+* This script will process the source JSONs and generate standardized SegList files in the `assemblyai_or_LT_jsons_to_seglsts/output_seglsts/` directory.
+* One IMPORTANT caveat is that currently the Assembly AI JSONs residing in the folder have no speaker mapping. The speakers are named as A, B, C... etc. so it's important that this mapping is added first.

@@ -1,6 +1,5 @@
 import os
 import io
-import argparse
 import requests
 import shutil
 from datetime import datetime, timezone
@@ -11,18 +10,23 @@ from google.oauth2.credentials import Credentials as Oauth2Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+# Configuration
+DRIVE_ROOT_FOLDER_ID = "1wceeL4NRLTXg57EIgV5peQPuDCBEthzl"
+TARGET_SERVICE_ACCOUNT = 'delivery-nvidia@delivery-nvidia.iam.gserviceaccount.com'
+LOCAL_DESTINATION_ROOT = os.path.join(os.path.dirname(__file__), "assembly_ai_jsons")
+
 def get_authenticated_drive_service():
     """Handles Service Account Impersonation to bypass Vertex VM scopes."""
     print("Authenticating...")
     
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/jupyter/.config/gcloud/application_default_credentials.json"
+    # Ensure ADC is pointed to the correct file if it exists, otherwise rely on default
+    if os.path.exists("/home/jupyter/.config/gcloud/application_default_credentials.json"):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/jupyter/.config/gcloud/application_default_credentials.json"
 
     base_credentials, project = google.auth.default(
         scopes=['https://www.googleapis.com/auth/cloud-platform']
     )
     base_credentials.refresh(Request())
-
-    TARGET_SERVICE_ACCOUNT = 'delivery-nvidia@delivery-nvidia.iam.gserviceaccount.com'
     
     url = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{TARGET_SERVICE_ACCOUNT}:generateAccessToken"
     headers = {
@@ -44,22 +48,22 @@ def get_authenticated_drive_service():
     
     return build('drive', 'v3', credentials=creds)
 
-
-def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination_dir):
-    # State tracking across recursive calls
+def sync_jsons_only_flattened(drive_service, root_folder_id, dest_root):
+    """
+    Syncs only .json files from Drive, replicating only the immediate parent folder.
+    Maintains 'updates only' logic and cleans up orphaned local files.
+    """
     stats = {'downloaded': 0, 'skipped': 0, 'deleted': 0}
     valid_local_paths = set()
     
-    print(f"\nStarting recursive sync for root folder ID: {root_folder_id}")
-    print(f"Destination: {root_destination_dir}\n")
+    print(f"\nStarting JSON sync from Drive Folder ID: {root_folder_id}")
+    print(f"Destination: {dest_root}\n")
 
-    def process_folder(drive_folder_id, current_local_dir):
-        # 1. Create the local directory if it doesn't exist
-        os.makedirs(current_local_dir, exist_ok=True)
-        valid_local_paths.add(current_local_dir)
-        
+    def walk_drive(drive_folder_id, parent_folder_name=None):
         page_token = None
         while True:
+            # Query for files and folders. We need parent ID to get parent name for top-level jsons if needed,
+            # but usually we want the name of the folder we are currently in.
             query = f"'{drive_folder_id}' in parents and trashed = false"
             res = drive_service.files().list(
                 q=query,
@@ -75,21 +79,30 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
             for f in files:
                 file_id = f['id']
                 file_name = f['name']
-                file_path = os.path.join(current_local_dir, file_name)
                 
-                # Add this exact path to our tracker so it doesn't get deleted later
+                if f['mimeType'] == 'application/vnd.google-apps.folder':
+                    # Recurse, passing the current folder's name as the new parent_folder_name
+                    walk_drive(file_id, parent_folder_name=file_name)
+                    continue
+                
+                # We only care about .json files
+                if not file_name.lower().endswith('.json'):
+                    continue
+                
+                # Determine local path: dest_root / parent_folder_name / file_name
+                # If the json is directly in the root folder provided, parent_folder_name might be None
+                # though usually it resides in a subfolder per requirements.
+                effective_parent = parent_folder_name if parent_folder_name else ""
+                local_parent_dir = os.path.join(dest_root, effective_parent)
+                file_path = os.path.join(local_parent_dir, file_name)
+                
+                # Track for cleanup
+                valid_local_paths.add(local_parent_dir)
                 valid_local_paths.add(file_path)
 
-                # 2. If it's a folder, RECURSE into it
-                if f['mimeType'] == 'application/vnd.google-apps.folder':
-                    process_folder(file_id, file_path)
-                    continue
-                    
-                # Skip Google Workspace documents (Docs, Sheets)
-                if 'application/vnd.google-apps' in f['mimeType']:
-                    continue
-
-                # 3. File Processing & Timestamps
+                # Process file
+                os.makedirs(local_parent_dir, exist_ok=True)
+                
                 drive_time_str = f['modifiedTime']
                 drive_mtime = datetime.fromisoformat(drive_time_str.replace('Z', '+00:00'))
 
@@ -105,8 +118,7 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                     stats['skipped'] += 1
                     continue
 
-                # 4. Download file
-                print(f"Downloading: {file_path}...")
+                print(f"Downloading: {effective_parent}/{file_name}...")
                 request = drive_service.files().get_media(fileId=file_id)
                 with io.FileIO(file_path, 'wb') as fh:
                     downloader = MediaIoBaseDownload(fh, request)
@@ -114,27 +126,24 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                     while done is False:
                         status, done = downloader.next_chunk()
                         
-                # Update timestamp
+                # Update local timestamp to match Drive
                 drive_mtime_ts = drive_mtime.timestamp()
                 os.utime(file_path, (drive_mtime_ts, drive_mtime_ts))
-                
                 stats['downloaded'] += 1
 
             page_token = res.get('nextPageToken', None)
             if page_token is None:
                 break
 
-    # Kick off the recursion from the root
-    process_folder(root_folder_id, root_destination_dir)
+    # Start recursion
+    walk_drive(root_folder_id)
 
-    # 5. The Recursive Cleanup Phase
+    # Cleanup local orphans
     print("\nStarting local cleanup...")
-    # os.walk bottom-up ensures we delete files before trying to delete the folder holding them
-    for root, dirs, files in os.walk(root_destination_dir, topdown=False):
-        
-        # Check files
+    for root, dirs, files in os.walk(dest_root, topdown=False):
+        # Skip hidden files
         for name in files:
-            if name.startswith('.'): continue # Skip hidden Jupyter files
+            if name.startswith('.'): continue
             
             file_path = os.path.join(root, name)
             if file_path not in valid_local_paths:
@@ -142,9 +151,8 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                 stats['deleted'] += 1
                 print(f"Deleted orphaned file: {file_path}")
                 
-        # Check directories
         for name in dirs:
-            if name.startswith('.'): continue # Skip hidden Jupyter directories
+            if name.startswith('.'): continue
             
             dir_path = os.path.join(root, name)
             if dir_path not in valid_local_paths:
@@ -152,21 +160,14 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                 stats['deleted'] += 1
                 print(f"Deleted orphaned directory tree: {dir_path}")
 
-    print(f"\nMirror Complete! Downloaded: {stats['downloaded']} | Skipped: {stats['skipped']} | Deleted: {stats['deleted']}")
-
+    print(f"\nSync Complete! Downloaded: {stats['downloaded']} | Skipped: {stats['skipped']} | Deleted: {stats['deleted']}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Recursively mirror a Google Drive folder locally.")
-    parser.add_argument("folder_id", nargs='?', default="1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1", help="The ID of the root Google Drive folder to mirror (default: 1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1).")
-    parser.add_argument("--destination", default="drive_data", help="The local directory to mirror into.")
-    
-    args = parser.parse_args()
-    
-    if not os.path.exists(args.destination):
-        os.makedirs(args.destination)
+    if not os.path.exists(LOCAL_DESTINATION_ROOT):
+        os.makedirs(LOCAL_DESTINATION_ROOT)
         
     try:
         drive_svc = get_authenticated_drive_service()
-        mirror_folder_sync_recursive(drive_svc, args.folder_id, args.destination)
+        sync_jsons_only_flattened(drive_svc, DRIVE_ROOT_FOLDER_ID, LOCAL_DESTINATION_ROOT)
     except Exception as e:
         print(f"\nScript failed: {e}")
