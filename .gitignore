@@ -4,6 +4,8 @@ drive_data/
 seglst_fixes_and_rttm_generation/output_data/
 segment_quality_report_gen/reports_approved/
 segment_quality_report_gen/reports_fixed/
+token_segment_density_check/fixed_tokens_output_folder/
+token_segment_density_check/token_segment_density.csv
 
 # File Extensions (Data/Audio)
 *.wav

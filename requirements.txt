@@ -1,0 +1,8 @@
+# Google Drive sync / upload scripts
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+requests>=2.31.0
+
+# segment_quality_report_gen/generate_report.py
+numpy>=1.24.0
+soundfile>=0.12.0
