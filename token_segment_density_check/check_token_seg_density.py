@@ -145,11 +145,40 @@ def discover_seglst_files(input_root: Path) -> list[Path]:
     return files
 
 
-def process_file(src_path: Path, dst_path: Path) -> FileReport:
-    task_id = src_path.parent.name
-    with src_path.open(encoding="utf-8") as fh:
-        data: list[dict[str, Any]] = json.load(fh)
+def load_seglst_segments(path: Path) -> list[dict[str, Any]] | None:
+    """Load a seglst JSON file, or return None if it cannot be parsed."""
+    try:
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        print(f"Warning: skipping {path}: {exc}", file=sys.stderr)
+        return None
 
+    if not isinstance(data, list):
+        print(
+            f"Warning: skipping {path}: expected JSON array, got {type(data).__name__}",
+            file=sys.stderr,
+        )
+        return None
+
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            print(
+                f"Warning: skipping {path}: segment at index {index} "
+                f"is {type(item).__name__}, expected object",
+                file=sys.stderr,
+            )
+            return None
+
+    return data
+
+
+def process_file(src_path: Path, dst_path: Path) -> FileReport | None:
+    data = load_seglst_segments(src_path)
+    if data is None:
+        return None
+
+    task_id = src_path.parent.name
     report = FileReport(path=src_path, task_id=task_id, segments_total=len(data))
 
     for item in data:
@@ -188,23 +217,35 @@ def fix_seglst_files(input_root: Path, output_root: Path) -> list[FileReport]:
     print()
 
     reports: list[FileReport] = []
+    skipped = 0
     total = len(files)
     for index, src in enumerate(files, start=1):
         rel = src.relative_to(input_root)
         dst = output_root / rel
         print(f"[{index}/{total}] {rel}", flush=True)
-        reports.append(process_file(src, dst))
+        report = process_file(src, dst)
+        if report is None:
+            skipped += 1
+        else:
+            reports.append(report)
 
     changed_reports = [r for r in reports if r.words_changed or r.session_id_changed]
     total_words = sum(r.words_changed for r in reports)
     total_session = sum(r.session_id_changed for r in reports)
 
     print()
-    print(f"Fixed {total} file(s)")
+    print(f"Fixed {len(reports)} file(s)")
+    if skipped:
+        print(f"Skipped {skipped} file(s) due to JSON or structure errors")
     print(f"  Segments with words changes: {total_words}")
     print(f"  Segments with session_id changes: {total_session}")
     print(f"  Files with changes applied: {len(changed_reports)}")
     print()
+
+    if not reports:
+        raise FileNotFoundError(
+            f"No valid seglst files could be processed under {input_root}"
+        )
 
     return reports
 
@@ -253,8 +294,9 @@ def iter_density_rows(fixed_output_root: Path) -> Iterator[dict[str, Any]]:
     for task_dir in iter_task_dirs(fixed_output_root):
         folder_name = task_dir.name
         for seglst_path in select_seglst_files(task_dir):
-            with seglst_path.open(encoding="utf-8") as fh:
-                segments: list[dict[str, Any]] = json.load(fh)
+            segments = load_seglst_segments(seglst_path)
+            if segments is None:
+                continue
 
             file_name = seglst_path.name
             for segment_index, segment in enumerate(segments):
