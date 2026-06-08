@@ -127,6 +127,33 @@ class FileReport:
     segments_total: int = 0
     words_changed: int = 0
     session_id_changed: int = 0
+    speaker_changed: int = 0
+    multiple_speakers: bool = False
+    speakers_found: tuple[str, ...] = ()
+
+
+def expected_speaker_from_path(path: Path) -> str | None:
+    match = SEGLST_FILENAME_RE.match(path.name)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def apply_speaker_fixes(
+    data: list[dict[str, Any]],
+    expected_speaker: str,
+    report: FileReport,
+) -> None:
+    speakers_found = {str(item.get("speaker", "")) for item in data}
+    report.speakers_found = tuple(sorted(speakers_found))
+    if len(speakers_found) > 1:
+        report.multiple_speakers = True
+
+    for item in data:
+        old_speaker = item.get("speaker")
+        if old_speaker != expected_speaker:
+            report.speaker_changed += 1
+            item["speaker"] = expected_speaker
 
 
 def iter_task_dirs(root: Path) -> Iterator[Path]:
@@ -180,6 +207,7 @@ def process_file(src_path: Path, dst_path: Path) -> FileReport | None:
         return None
 
     task_id = src_path.parent.name
+    expected_speaker = expected_speaker_from_path(src_path)
     report = FileReport(path=src_path, task_id=task_id, segments_total=len(data))
 
     for item in data:
@@ -193,6 +221,14 @@ def process_file(src_path: Path, dst_path: Path) -> FileReport | None:
         if old_session != task_id:
             report.session_id_changed += 1
             item["session_id"] = task_id
+
+    if expected_speaker is not None:
+        apply_speaker_fixes(data, expected_speaker, report)
+    else:
+        print(
+            f"Warning: cannot derive expected speaker from filename: {src_path.name}",
+            file=sys.stderr,
+        )
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     with dst_path.open("w", encoding="utf-8", newline="\n") as fh:
@@ -228,11 +264,30 @@ def fix_seglst_files(input_root: Path, output_root: Path) -> list[FileReport]:
         if report is None:
             skipped += 1
         else:
+            if report.multiple_speakers:
+                print(
+                    f"  Warning: multiple speakers in {src.name}: "
+                    f"{', '.join(report.speakers_found)}",
+                    file=sys.stderr,
+                )
+            if report.speaker_changed:
+                print(
+                    f"  Warning: speaker corrected to "
+                    f"{expected_speaker_from_path(src)!r} in {report.speaker_changed} "
+                    f"segment(s)",
+                    file=sys.stderr,
+                )
             reports.append(report)
 
-    changed_reports = [r for r in reports if r.words_changed or r.session_id_changed]
+    changed_reports = [
+        r
+        for r in reports
+        if r.words_changed or r.session_id_changed or r.speaker_changed
+    ]
     total_words = sum(r.words_changed for r in reports)
     total_session = sum(r.session_id_changed for r in reports)
+    total_speaker = sum(r.speaker_changed for r in reports)
+    files_with_multiple_speakers = sum(1 for r in reports if r.multiple_speakers)
 
     print()
     print(f"Fixed {len(reports)} file(s)")
@@ -240,6 +295,8 @@ def fix_seglst_files(input_root: Path, output_root: Path) -> list[FileReport]:
         print(f"Skipped {skipped} file(s) due to JSON or structure errors")
     print(f"  Segments with words changes: {total_words}")
     print(f"  Segments with session_id changes: {total_session}")
+    print(f"  Segments with speaker changes: {total_speaker}")
+    print(f"  Files with multiple speakers: {files_with_multiple_speakers}")
     print(f"  Files with changes applied: {len(changed_reports)}")
     print()
 
