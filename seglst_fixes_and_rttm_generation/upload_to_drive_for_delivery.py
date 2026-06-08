@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from dataclasses import dataclass, field
 import requests
 from datetime import datetime, timezone
 import google.auth
@@ -15,6 +16,140 @@ SOURCE_DIR = os.path.join(SCRIPT_DIR, 'output_data')
 DRIVE_DATA_ROOT = os.path.join(os.path.dirname(SCRIPT_DIR), 'drive_data')
 TARGET_DRIVE_FOLDER_ID = '1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf'
 TARGET_SERVICE_ACCOUNT = 'delivery-nvidia@delivery-nvidia.iam.gserviceaccount.com'
+
+SEGLST_SUFFIX = ".seglst.json"
+RTTM_SUFFIX = ".rttm"
+WAV_SUFFIX = ".wav"
+NON_DELIVERY_SUFFIXES = (
+    f"_approved{SEGLST_SUFFIX}",
+    f"_fixed{SEGLST_SUFFIX}",
+    "_approved.rttm",
+    "_fixed.rttm",
+)
+
+
+@dataclass
+class TaskSpeakerAudit:
+    task_name: str
+    seglst_speakers: set[str] = field(default_factory=set)
+    rttm_speakers: set[str] = field(default_factory=set)
+    wav_speakers: set[str] = field(default_factory=set)
+    non_delivery_files: list[str] = field(default_factory=list)
+    duplicate_seglst: dict[str, list[str]] = field(default_factory=dict)
+    duplicate_rttm: dict[str, list[str]] = field(default_factory=dict)
+    duplicate_wav: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def complete_speakers(self) -> set[str]:
+        return self.seglst_speakers & self.rttm_speakers & self.wav_speakers
+
+    @property
+    def all_speakers(self) -> set[str]:
+        return self.seglst_speakers | self.rttm_speakers | self.wav_speakers
+
+
+def _is_non_delivery_filename(filename: str) -> bool:
+    return any(filename.endswith(suffix) for suffix in NON_DELIVERY_SUFFIXES)
+
+
+def _collect_delivery_speakers(
+    directory: str,
+    suffix: str,
+) -> tuple[set[str], dict[str, list[str]]]:
+    """Return speaker ids and duplicate delivery-ready files with the given suffix."""
+    speakers: set[str] = set()
+    files_by_speaker: dict[str, list[str]] = {}
+
+    if not os.path.isdir(directory):
+        return speakers, {}
+
+    for filename in os.listdir(directory):
+        path = os.path.join(directory, filename)
+        if not os.path.isfile(path):
+            continue
+        if not filename.endswith(suffix):
+            continue
+        if _is_non_delivery_filename(filename):
+            continue
+
+        speaker = filename[: -len(suffix)]
+        files_by_speaker.setdefault(speaker, []).append(filename)
+        speakers.add(speaker)
+
+    duplicates = {
+        speaker: filenames
+        for speaker, filenames in files_by_speaker.items()
+        if len(filenames) > 1
+    }
+    return speakers, duplicates
+
+
+def audit_task_speakers(task_name: str) -> TaskSpeakerAudit:
+    """Audit delivery-ready speaker files for a task folder."""
+    output_task_dir = os.path.join(SOURCE_DIR, task_name)
+    wav_task_dir = os.path.join(DRIVE_DATA_ROOT, task_name)
+    audit = TaskSpeakerAudit(task_name=task_name)
+
+    if os.path.isdir(output_task_dir):
+        for filename in sorted(os.listdir(output_task_dir)):
+            path = os.path.join(output_task_dir, filename)
+            if os.path.isfile(path) and _is_non_delivery_filename(filename):
+                audit.non_delivery_files.append(filename)
+
+    audit.seglst_speakers, audit.duplicate_seglst = _collect_delivery_speakers(
+        output_task_dir, SEGLST_SUFFIX
+    )
+    audit.rttm_speakers, audit.duplicate_rttm = _collect_delivery_speakers(
+        output_task_dir, RTTM_SUFFIX
+    )
+    audit.wav_speakers, audit.duplicate_wav = _collect_delivery_speakers(
+        wav_task_dir, WAV_SUFFIX
+    )
+
+    return audit
+
+
+def print_task_speaker_report(task_name: str) -> None:
+    """Print speaker counts and delivery issues for a task folder."""
+    audit = audit_task_speakers(task_name)
+
+    print(
+        f"Speakers (complete set): {len(audit.complete_speakers)} | "
+        f"seglst.json: {len(audit.seglst_speakers)} | "
+        f"rttm: {len(audit.rttm_speakers)} | "
+        f"wav: {len(audit.wav_speakers)}"
+    )
+
+    for filename in audit.non_delivery_files:
+        print(
+            f"Warning: non-delivery file present (run strip_approved_suffix.py): {filename}",
+            file=sys.stderr,
+        )
+
+    for label, duplicates in (
+        ("seglst.json", audit.duplicate_seglst),
+        ("rttm", audit.duplicate_rttm),
+        ("wav", audit.duplicate_wav),
+    ):
+        for speaker, filenames in sorted(duplicates.items()):
+            print(
+                f"Warning: duplicate {label} for {speaker}: {', '.join(filenames)}",
+                file=sys.stderr,
+            )
+
+    for speaker in sorted(audit.all_speakers - audit.complete_speakers):
+        missing = []
+        if speaker not in audit.seglst_speakers:
+            missing.append("seglst.json")
+        if speaker not in audit.rttm_speakers:
+            missing.append("rttm")
+        if speaker not in audit.wav_speakers:
+            missing.append("wav")
+        print(
+            f"Warning: {speaker} missing {', '.join(missing)}",
+            file=sys.stderr,
+        )
+
 
 def get_authenticated_drive_service():
     """Handles Service Account Impersonation to bypass Vertex VM scopes."""
@@ -157,6 +292,9 @@ def upload_files_recursive(service, local_path, drive_parent_id, current_rel_pat
                 fileId=drive_item_info['id'],
                 supportsAllDrives=True
             ).execute()
+
+    if current_rel_path:
+        print_task_speaker_report(current_rel_path)
 
 
 def resolve_task_dirs(source_dir: str, task_names: list[str]) -> list[str]:
