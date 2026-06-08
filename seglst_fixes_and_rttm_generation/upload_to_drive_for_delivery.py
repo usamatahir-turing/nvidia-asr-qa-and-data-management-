@@ -1,4 +1,6 @@
+import argparse
 import os
+import sys
 import requests
 from datetime import datetime, timezone
 import google.auth
@@ -156,14 +158,113 @@ def upload_files_recursive(service, local_path, drive_parent_id, current_rel_pat
                 supportsAllDrives=True
             ).execute()
 
-if __name__ == "__main__":
+
+def resolve_task_dirs(source_dir: str, task_names: list[str]) -> list[str]:
+    """Return task folder names to upload, validating paths under source_dir."""
+    if not task_names:
+        tasks = sorted(
+            name
+            for name in os.listdir(source_dir)
+            if os.path.isdir(os.path.join(source_dir, name))
+        )
+        if not tasks:
+            raise ValueError(f"No task folders found in {source_dir}")
+        return tasks
+
+    missing = [
+        name for name in task_names if not os.path.isdir(os.path.join(source_dir, name))
+    ]
+    if missing:
+        raise ValueError(
+            f"Task folder(s) not found under {source_dir}: {', '.join(missing)}"
+        )
+    return task_names
+
+
+def get_or_create_drive_folder(
+    service,
+    name: str,
+    parent_id: str,
+    drive_items: dict,
+) -> str:
+    """Return the Drive folder id for name, creating it when missing."""
+    if name in drive_items and drive_items[name]["mimeType"] == "application/vnd.google-apps.folder":
+        print(f"Folder exists: {name}")
+        return drive_items[name]["id"]
+
+    print(f"Creating folder: {name}")
+    return create_drive_folder(service, name, parent_id)
+
+
+def upload_task_folders(service, source_dir: str, drive_parent_id: str, task_names: list[str]):
+    """Upload only the selected task folders into the target Drive folder."""
+    drive_items = get_drive_items(service, drive_parent_id)
+
+    for task_name in task_names:
+        local_path = os.path.join(source_dir, task_name)
+        print(f"\n--- {task_name} ---")
+        folder_id = get_or_create_drive_folder(service, task_name, drive_parent_id, drive_items)
+        upload_files_recursive(service, local_path, folder_id, task_name)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Upload seglst/rttm files from output_data to the pre-delivery Drive folder, "
+            "including matching channel wav files from drive_data."
+        )
+    )
+    parser.add_argument(
+        "tasks",
+        nargs="*",
+        metavar="TASK",
+        help=(
+            "Task folder name(s) under output_data (e.g. NV-AR-SS03-CONVO07). "
+            "Upload all task folders when omitted."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
     if not os.path.exists(SOURCE_DIR):
-        print(f"Error: Source directory {SOURCE_DIR} does not exist.")
-    else:
-        try:
-            drive_service = get_authenticated_drive_service()
-            print(f"Starting upload from {SOURCE_DIR} to Drive folder {TARGET_DRIVE_FOLDER_ID}...")
+        print(f"Error: Source directory {SOURCE_DIR} does not exist.", file=sys.stderr)
+        return 1
+
+    try:
+        task_names = resolve_task_dirs(SOURCE_DIR, args.tasks)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        drive_service = get_authenticated_drive_service()
+        if args.tasks:
+            print(
+                f"Starting upload of {len(task_names)} task folder(s) from {SOURCE_DIR} "
+                f"to Drive folder {TARGET_DRIVE_FOLDER_ID}..."
+            )
+        else:
+            print(
+                f"Starting upload of all task folders from {SOURCE_DIR} "
+                f"to Drive folder {TARGET_DRIVE_FOLDER_ID}..."
+            )
+        print("Tasks:", ", ".join(task_names))
+
+        if args.tasks:
+            upload_task_folders(drive_service, SOURCE_DIR, TARGET_DRIVE_FOLDER_ID, task_names)
+        else:
             upload_files_recursive(drive_service, SOURCE_DIR, TARGET_DRIVE_FOLDER_ID, "")
-            print("Upload complete!")
-        except Exception as e:
-            print(f"An error occurred: {e}")
+
+        print("Upload complete!")
+    except Exception as e:
+        print(f"An error occurred: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
