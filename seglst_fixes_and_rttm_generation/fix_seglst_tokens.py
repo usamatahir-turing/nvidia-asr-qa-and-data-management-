@@ -25,7 +25,7 @@ Token fixes applied to each segment's ``words`` field:
 
 - Add missing opening bracket: ``inhale]`` -> ``[inhale]``
 - Remove space after ``[``: ``[ exhale]`` -> ``[exhale]``
-- Hyphenate compounds: ``other- noise``, ``[other noise]`` -> ``[other-noise]``
+- Hyphenate compounds: ``other- noise``, ``other - noise``, ``[other noise]`` -> ``[other-noise]``
 - Lowercase token text inside brackets
 
 ``session_id`` is set to the parent task folder name (e.g. ``NV-KO-SS03-CONVO08``).
@@ -62,8 +62,9 @@ _SPLIT_BRACKET_RE = re.compile(r"\[([a-z])\[([a-z-]+)\]")
 def normalize_token_content(content: str) -> str:
     """Normalize the interior of a bracket token."""
     text = content.strip()
-    text = re.sub(r"-\s+", "-", text)
+    text = re.sub(r"\s*-\s*", "-", text)
     text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"-+", "-", text)
     return text.lower()
 
 

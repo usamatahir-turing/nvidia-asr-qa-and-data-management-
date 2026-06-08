@@ -67,8 +67,9 @@ CSV_COLUMNS = (
 def normalize_token_content(content: str) -> str:
     """Normalize the interior of a bracket token."""
     text = content.strip()
-    text = re.sub(r"-\s+", "-", text)
+    text = re.sub(r"\s*-\s*", "-", text)
     text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"-+", "-", text)
     return text.lower()
 
 
