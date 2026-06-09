@@ -1,0 +1,41 @@
+Input root : F:\workbench-nvidia-asr-qa\nvidia-asr-qa-and-data-management-\seglst_fixes_and_rttm_generation\output_data
+Source type: rttm
+Conversations: 5 | Annotation files: 15
+
+=== all (5 conversations) ===
+Files processed               : 15
+Total speaker segments        : 2659
+Number of total speakers      : 15 (globally-unique IDs, keyed as session::speaker)
+Avg speakers per conversation : 3.000
+Median speaker segment length : 0.800 sec
+Average speaker segment length: 1.877 sec
+STD speaker segment length    : 2.809 sec
+Min speaker segment length    : 0.010 sec
+Max speaker segment length    : 29.060 sec
+Total speech duration         : 1.108 h  (union of all speaker segments)
+Total overlap duration        : 0.235 h  (>=2 speakers active, counted once)
+Total file-span duration      : 1.343 h  (sum of (max_end - min_start) per conversation)
+Speech overlap ratio          : 21.19 %  (T_overlap / T_speech, canonical / literature definition)
+Overlap over total audio      : 17.49 %  (T_overlap / T_filespan, includes silence; for reference only)
+Per-conversation mean overlap : 18.02 %  (macro-avg over conversations; diagnostic)
+Per-conversation median overlap: 18.77 %  (diagnostic)
+
+Unique speaker IDs (15):
+NV-AR-SS03-CONVO07::alaa.k@turing.com, NV-AR-SS03-CONVO07::fayez.m@turing.com, NV-AR-SS03-CONVO07::mohamed.o@turing.com, NV-GR-SS04-CONVO10::benjamin.l@turing.com, NV-JA-SS04-CONVO11::daishi.w@turing.com, NV-JA-SS04-CONVO11::prosper.m1@turing.com, NV-JA-SS04-CONVO11::seiichiro.m@turing.com, NV-JA-SS04-CONVO11::takahiro.o@turing.com, NV-KO-SS03-CONVO07::han.k@turing.com, NV-KO-SS03-CONVO07::jiwon.l@turing.com, NV-KO-SS03-CONVO07::kim.j@turing.com, NV-KO-SS03-CONVO07::yunseol.c@turing.com, NV-PT-SS03-CONVO08::erika.b@turing.com, NV-PT-SS03-CONVO08::joao.f@turing.com, NV-PT-SS03-CONVO08::marcos.f@turing.com
+
+Unique speaker IDs (one per line):
+NV-AR-SS03-CONVO07::alaa.k@turing.com
+NV-AR-SS03-CONVO07::fayez.m@turing.com
+NV-AR-SS03-CONVO07::mohamed.o@turing.com
+NV-GR-SS04-CONVO10::benjamin.l@turing.com
+NV-JA-SS04-CONVO11::daishi.w@turing.com
+NV-JA-SS04-CONVO11::prosper.m1@turing.com
+NV-JA-SS04-CONVO11::seiichiro.m@turing.com
+NV-JA-SS04-CONVO11::takahiro.o@turing.com
+NV-KO-SS03-CONVO07::han.k@turing.com
+NV-KO-SS03-CONVO07::jiwon.l@turing.com
+NV-KO-SS03-CONVO07::kim.j@turing.com
+NV-KO-SS03-CONVO07::yunseol.c@turing.com
+NV-PT-SS03-CONVO08::erika.b@turing.com
+NV-PT-SS03-CONVO08::joao.f@turing.com
+NV-PT-SS03-CONVO08::marcos.f@turing.com
