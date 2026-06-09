@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
 Copy conversations from the pre-delivery Drive folder to the final delivery folder,
-renaming speakers from email addresses to SPK labels (e.g. SPKA, SPKB).
+renaming speakers from email addresses to SPK01, SPK02, ...
 
-Reads mappings from speaker_mappings.csv. Source Drive is read-only; transformed
-files are written to the destination Drive folder.
+For each conversation folder on source Drive, speakers with a complete set of
+delivery files (seglst + rttm + wav) are assigned SPK labels in alphabetical order
+by email. Mappings are written to mappings.csv, then files are copied to the
+destination Drive folder with updated seglst/rttm content.
+
+Source Drive is read-only.
 
 Usage::
 
@@ -33,7 +37,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_MAPPINGS = SCRIPT_DIR / "speaker_mappings.csv"
+DEFAULT_MAPPINGS_OUT = SCRIPT_DIR / "mappings.csv"
 
 SOURCE_DRIVE_FOLDER_ID = "1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf"
 DEST_DRIVE_FOLDER_ID = "1WmpHwiDiatzL9OCToyLEFhmB_Eo_H6VS"
@@ -43,6 +47,11 @@ SEGLST_SUFFIX = ".seglst.json"
 RTTM_SUFFIX = ".rttm"
 WAV_SUFFIX = ".wav"
 FOLDER_MIME = "application/vnd.google-apps.folder"
+NON_DELIVERY_SEGLST_SUFFIXES = (
+    f"_approved{SEGLST_SUFFIX}",
+    f"_fixed{SEGLST_SUFFIX}",
+)
+NON_DELIVERY_RTTM_SUFFIXES = ("_approved.rttm", "_fixed.rttm")
 
 
 @dataclass(frozen=True)
@@ -128,7 +137,9 @@ def list_conversation_folders(service, root_folder_id: str) -> dict[str, dict]:
     }
 
 
-def get_or_create_folder(service, name: str, parent_id: str, cache: dict[str, dict]) -> str:
+def get_or_create_folder(
+    service, name: str, parent_id: str, cache: dict[str, dict]
+) -> str:
     if name in cache and cache[name].get("mimeType") == FOLDER_MIME:
         return cache[name]["id"]
 
@@ -200,28 +211,100 @@ def upload_drive_file(
         print(f"  Uploaded {filename}")
 
 
-def load_speaker_mappings(path: Path) -> dict[str, list[SpeakerMapping]]:
-    mappings: dict[str, list[SpeakerMapping]] = {}
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        required = {"Conversation", "Speaker_label", "Speaker"}
-        if not required.issubset(reader.fieldnames or []):
-            raise ValueError(
-                f"{path} must contain columns: {', '.join(sorted(required))}"
+def is_delivery_seglst(filename: str) -> bool:
+    return filename.endswith(SEGLST_SUFFIX) and not any(
+        filename.endswith(suffix) for suffix in NON_DELIVERY_SEGLST_SUFFIXES
+    )
+
+
+def is_delivery_rttm(filename: str) -> bool:
+    return filename.endswith(RTTM_SUFFIX) and not any(
+        filename.endswith(suffix) for suffix in NON_DELIVERY_RTTM_SUFFIXES
+    )
+
+
+def is_delivery_wav(filename: str) -> bool:
+    return filename.endswith(WAV_SUFFIX)
+
+
+def discover_candidate_emails(source_items: dict[str, dict]) -> set[str]:
+    emails: set[str] = set()
+    for filename in source_items:
+        if is_delivery_seglst(filename):
+            emails.add(filename[: -len(SEGLST_SUFFIX)])
+        elif is_delivery_rttm(filename):
+            emails.add(filename[: -len(RTTM_SUFFIX)])
+        elif is_delivery_wav(filename):
+            emails.add(filename[: -len(WAV_SUFFIX)])
+    return emails
+
+
+def required_source_filenames(email: str) -> tuple[str, str, str]:
+    return (
+        f"{email}{SEGLST_SUFFIX}",
+        f"{email}{RTTM_SUFFIX}",
+        f"{email}{WAV_SUFFIX}",
+    )
+
+
+def destination_filenames(spk_name: str) -> tuple[str, str, str]:
+    return (
+        f"{spk_name}{SEGLST_SUFFIX}",
+        f"{spk_name}{RTTM_SUFFIX}",
+        f"{spk_name}{WAV_SUFFIX}",
+    )
+
+
+def build_speaker_mappings(
+    conversation: str,
+    source_items: dict[str, dict],
+) -> list[SpeakerMapping]:
+    """Assign SPK01, SPK02, ... to speakers with a complete delivery file set."""
+    mappings: list[SpeakerMapping] = []
+    spk_index = 1
+
+    for email in sorted(discover_candidate_emails(source_items)):
+        seglst_name, rttm_name, wav_name = required_source_filenames(email)
+        missing = [
+            name
+            for name in (seglst_name, rttm_name, wav_name)
+            if name not in source_items
+        ]
+        if missing:
+            warn(
+                f"Warning: {conversation}: skipping {email} — "
+                f"missing source file(s): {', '.join(missing)}"
             )
-        for row in reader:
-            conversation = row["Conversation"].strip()
-            label = row["Speaker_label"].strip()
-            email = row["Speaker"].strip()
-            if not conversation or not label or not email:
-                continue
-            mappings.setdefault(conversation, []).append(
-                SpeakerMapping(conversation=conversation, label=label, email=email)
-            )
+            continue
+
+        label = f"{spk_index:02d}"
+        mappings.append(
+            SpeakerMapping(conversation=conversation, label=label, email=email)
+        )
+        spk_index += 1
+
     return mappings
 
 
-def transform_seglst(content: bytes, old_speaker: str, new_speaker: str) -> bytes:
+def write_mappings_csv(path: Path, mappings: list[SpeakerMapping]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=["Conversation", "Speaker_label", "Speaker"],
+        )
+        writer.writeheader()
+        for mapping in mappings:
+            writer.writerow(
+                {
+                    "Conversation": mapping.conversation,
+                    "Speaker_label": mapping.label,
+                    "Speaker": mapping.email,
+                }
+            )
+
+
+def transform_seglst(content: bytes, new_speaker: str) -> bytes:
     data = json.loads(content.decode("utf-8"))
     if not isinstance(data, list):
         raise ValueError("seglst JSON must be a list")
@@ -244,31 +327,17 @@ def transform_rttm(content: bytes, old_speaker: str, new_speaker: str) -> bytes:
             continue
         parts = line.split()
         if len(parts) >= 8 and parts[0] == "SPEAKER":
-            parts[1] = new_speaker
-            parts[7] = new_speaker
+            if parts[1] == old_speaker:
+                parts[1] = new_speaker
+            if parts[7] == old_speaker:
+                parts[7] = new_speaker
             lines_out.append(" ".join(parts))
         else:
             lines_out.append(line)
     return ("\n".join(lines_out) + ("\n" if text.endswith("\n") else "")).encode("utf-8")
 
 
-def required_source_filenames(email: str) -> tuple[str, str, str]:
-    return (
-        f"{email}{SEGLST_SUFFIX}",
-        f"{email}{RTTM_SUFFIX}",
-        f"{email}{WAV_SUFFIX}",
-    )
-
-
-def destination_filenames(spk_name: str) -> tuple[str, str, str]:
-    return (
-        f"{spk_name}{SEGLST_SUFFIX}",
-        f"{spk_name}{RTTM_SUFFIX}",
-        f"{spk_name}{WAV_SUFFIX}",
-    )
-
-
-def process_conversation(
+def copy_conversation(
     service,
     conversation: str,
     speaker_mappings: list[SpeakerMapping],
@@ -279,25 +348,6 @@ def process_conversation(
 ) -> bool:
     print(f"\n--- {conversation} ---", flush=True)
     source_items = get_drive_items(service, source_folder_id)
-    errors: list[str] = []
-
-    for mapping in speaker_mappings:
-        seglst_name, rttm_name, wav_name = required_source_filenames(mapping.email)
-        missing = [
-            name
-            for name in (seglst_name, rttm_name, wav_name)
-            if name not in source_items
-        ]
-        if missing:
-            errors.append(
-                f"{mapping.email}: missing source file(s): {', '.join(missing)}"
-            )
-
-    if errors:
-        for message in errors:
-            warn(f"Warning: {conversation}: {message}")
-        warn(f"Warning: {conversation}: failed; no files copied")
-        return False
 
     dest_items_cache = get_drive_items(service, dest_parent_id)
     dest_folder_id = get_or_create_folder(
@@ -309,18 +359,13 @@ def process_conversation(
         src_seglst, src_rttm, src_wav = required_source_filenames(mapping.email)
         dst_seglst, dst_rttm, dst_wav = destination_filenames(mapping.spk_name)
 
-        print(
-            f"Processing {mapping.email} -> {mapping.spk_name}",
-            flush=True,
-        )
+        print(f"Copying {mapping.email} -> {mapping.spk_name}", flush=True)
 
         seglst_bytes = download_drive_file(service, source_items[src_seglst]["id"])
         rttm_bytes = download_drive_file(service, source_items[src_rttm]["id"])
         wav_bytes = download_drive_file(service, source_items[src_wav]["id"])
 
-        transformed_seglst = transform_seglst(
-            seglst_bytes, mapping.email, mapping.spk_name
-        )
+        transformed_seglst = transform_seglst(seglst_bytes, mapping.spk_name)
         transformed_rttm = transform_rttm(
             rttm_bytes, mapping.email, mapping.spk_name
         )
@@ -353,63 +398,48 @@ def process_conversation(
             dry_run=dry_run,
         )
 
-    print(f"Completed {conversation}")
+    print(f"Completed {conversation} ({len(speaker_mappings)} speaker(s))")
     return True
+
+
+def resolve_conversations(
+    requested: list[str],
+    source_folders: dict[str, dict],
+) -> list[str]:
+    if requested:
+        return requested
+    return sorted(source_folders)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Copy conversations from pre-delivery Drive to final delivery Drive, "
-            "renaming speakers using speaker_mappings.csv."
+            "Auto-map speakers to SPK01/SPK02 labels and copy conversations from "
+            "pre-delivery Drive to final delivery Drive."
         )
     )
     parser.add_argument(
         "conversations",
         nargs="*",
         metavar="CONVERSATION",
-        help="Conversation folder name(s) to process. Defaults to all in the CSV.",
+        help="Conversation folder name(s) on source Drive. Defaults to all folders.",
     )
     parser.add_argument(
-        "--mappings",
+        "--mappings-out",
         type=Path,
-        default=DEFAULT_MAPPINGS,
-        help=f"Path to speaker_mappings.csv (default: {DEFAULT_MAPPINGS.name})",
+        default=DEFAULT_MAPPINGS_OUT,
+        help=f"Path for generated mappings CSV (default: {DEFAULT_MAPPINGS_OUT.name})",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate and report actions without writing to destination Drive",
+        help="Write mappings.csv and report uploads without writing to destination Drive",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-
-    if not args.mappings.is_file():
-        warn(f"Error: mappings file not found: {args.mappings}")
-        return 1
-
-    try:
-        mappings_by_conversation = load_speaker_mappings(args.mappings)
-    except ValueError as exc:
-        warn(f"Error: {exc}")
-        return 1
-
-    if not mappings_by_conversation:
-        warn(f"Error: no mappings found in {args.mappings}")
-        return 1
-
-    conversations = args.conversations or sorted(mappings_by_conversation)
-    unknown_in_csv = [
-        name for name in conversations if name not in mappings_by_conversation
-    ]
-    if unknown_in_csv:
-        for name in unknown_in_csv:
-            warn(f"Warning: {name}: not found in speaker_mappings.csv")
-        warn("Error: one or more requested conversations are missing from the CSV")
-        return 1
 
     try:
         service = get_authenticated_drive_service()
@@ -418,22 +448,16 @@ def main() -> int:
         return 1
 
     source_folders = list_conversation_folders(service, SOURCE_DRIVE_FOLDER_ID)
-    dest_root_items = get_drive_items(service, DEST_DRIVE_FOLDER_ID)
-
-    for folder_name in sorted(source_folders):
-        if folder_name not in mappings_by_conversation:
-            warn(
-                f"Warning: {folder_name}: present on source Drive but not in "
-                f"speaker_mappings.csv; skipping"
-            )
+    conversations = resolve_conversations(args.conversations, source_folders)
 
     print(f"Source Drive folder: {SOURCE_DRIVE_FOLDER_ID}")
     print(f"Destination Drive folder: {DEST_DRIVE_FOLDER_ID}")
     if args.dry_run:
-        print("Mode: DRY RUN")
+        print("Mode: DRY RUN (destination Drive will not be modified)")
     print(f"Conversations to process: {', '.join(conversations)}")
 
-    successes = 0
+    all_mappings: list[SpeakerMapping] = []
+    planned: list[tuple[str, list[SpeakerMapping]]] = []
     failures = 0
 
     for conversation in conversations:
@@ -445,10 +469,32 @@ def main() -> int:
             failures += 1
             continue
 
-        ok = process_conversation(
+        source_items = get_drive_items(service, source_folders[conversation]["id"])
+        mappings = build_speaker_mappings(conversation, source_items)
+        if not mappings:
+            warn(
+                f"Warning: {conversation}: no speakers with a complete seglst/rttm/wav "
+                f"set found; failed"
+            )
+            failures += 1
+            continue
+
+        all_mappings.extend(mappings)
+        planned.append((conversation, mappings))
+
+    if not planned:
+        warn("Error: no conversations could be mapped")
+        return 1
+
+    write_mappings_csv(args.mappings_out, all_mappings)
+    print(f"Wrote {len(all_mappings)} mapping row(s) to {args.mappings_out}")
+
+    successes = 0
+    for conversation, mappings in planned:
+        ok = copy_conversation(
             service,
             conversation,
-            mappings_by_conversation[conversation],
+            mappings,
             source_folders[conversation]["id"],
             DEST_DRIVE_FOLDER_ID,
             dry_run=args.dry_run,
