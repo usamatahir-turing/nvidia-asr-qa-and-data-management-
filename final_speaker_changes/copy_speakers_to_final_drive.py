@@ -223,20 +223,23 @@ def is_delivery_rttm(filename: str) -> bool:
     )
 
 
-def is_delivery_wav(filename: str) -> bool:
-    return filename.endswith(WAV_SUFFIX)
+def is_mixed_wav(filename: str) -> bool:
+    return filename.endswith(WAV_SUFFIX) and "_mixed" in filename
 
 
 def discover_candidate_emails(source_items: dict[str, dict]) -> set[str]:
+    """Discover speaker ids from seglst/rttm only (not from wav filenames)."""
     emails: set[str] = set()
     for filename in source_items:
         if is_delivery_seglst(filename):
             emails.add(filename[: -len(SEGLST_SUFFIX)])
         elif is_delivery_rttm(filename):
             emails.add(filename[: -len(RTTM_SUFFIX)])
-        elif is_delivery_wav(filename):
-            emails.add(filename[: -len(WAV_SUFFIX)])
     return emails
+
+
+def discover_mixed_wav_files(source_items: dict[str, dict]) -> list[str]:
+    return sorted(name for name in source_items if is_mixed_wav(name))
 
 
 def required_source_filenames(email: str) -> tuple[str, str, str]:
@@ -398,7 +401,27 @@ def copy_conversation(
             dry_run=dry_run,
         )
 
-    print(f"Completed {conversation} ({len(speaker_mappings)} speaker(s))")
+    mixed_wav_files = discover_mixed_wav_files(source_items)
+    for mixed_wav_name in mixed_wav_files:
+        print(f"Copying mixed audio {mixed_wav_name} (unchanged)", flush=True)
+        mixed_wav_bytes = download_drive_file(
+            service, source_items[mixed_wav_name]["id"]
+        )
+        upload_drive_file(
+            service,
+            dest_folder_id,
+            mixed_wav_name,
+            mixed_wav_bytes,
+            "audio/wav",
+            dest_items,
+            dry_run=dry_run,
+        )
+
+    mixed_count = len(mixed_wav_files)
+    print(
+        f"Completed {conversation} ({len(speaker_mappings)} speaker(s), "
+        f"{mixed_count} mixed wav file(s))"
+    )
     return True
 
 
