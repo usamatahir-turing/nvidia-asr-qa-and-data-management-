@@ -74,6 +74,64 @@ python upload_to_drive_for_delivery.py
 This will upload all the RTTMs, SegLists, from *seglst\_fixes\_and\_rttm\_generation/output\_data* and their corresponding channel .wav files from tasks in *drive\_data* to a Google drive folder [pre\_delivery\_folder](https://drive.google.com/drive/folders/1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf)  
 *Note: It’s important that for any uploading of data, the folder is in a Shared Drive location (not shared with me)*
 
+To upload specific conversations only:
+
+```shell
+python upload_to_drive_for_delivery.py NV-AR-SS03-CONVO07 NV-KO-SS03-CONVO07
+```
+
+# Seglist JSON Statistics
+
+This script computes segment-length and speech-overlap statistics from delivery-ready seglst or RTTM files in *seglst\_fixes\_and\_rttm\_generation/output\_data*. Results are written to *seglst\_fixes\_and\_rttm\_generation/turing\_json\_stats.txt*.
+
+### Usage
+
+```shell
+cd seglst_fixes_and_rttm_generation/
+python turing_json_stats.py
+```
+
+To include per-conversation breakdowns in the report:
+
+```shell
+python turing_json_stats.py --per-conversation
+```
+
+To run on specific conversations only:
+
+```shell
+python turing_json_stats.py NV-AR-SS03-CONVO07 NV-KO-SS03-CONVO07
+```
+
+By default it prefers seglst files and falls back to RTTM per speaker (`--source auto`). Use `--source seglst` or `--source rttm` to force one format.
+
+# Final Speaker Changes
+
+After data is in the [pre\_delivery\_folder](https://drive.google.com/drive/folders/1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf), this script copies conversations to the final delivery Drive folder. Speaker email filenames are renamed to `SPK01`, `SPK02`, etc. (alphabetical by email). It also updates speaker fields inside seglst and RTTM files. `*_mixed.wav` files are copied unchanged.
+
+The script writes *final\_speaker\_changes/mappings.csv* before copying to Drive.
+
+### Usage
+
+```shell
+cd final_speaker_changes/
+python copy_speakers_to_final_drive.py
+```
+
+To process specific conversations only:
+
+```shell
+python copy_speakers_to_final_drive.py NV-AR-SS03-CONVO09 NV-KO-SS03-CONVO07
+```
+
+To validate without uploading to the destination Drive folder:
+
+```shell
+python copy_speakers_to_final_drive.py --dry-run NV-GR-SS04-CONVO10
+```
+
+*Note: The destination folder must be on a Shared Drive and accessible to the delivery service account (same requirement as pre-delivery upload).*
+
 # Segment Annotation Quality
 
 The following checks are currently in place and should be present in each generated report:
