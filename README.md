@@ -220,3 +220,32 @@ python seglst_gen.py
 ```
 * This script will process the source JSONs and generate standardized SegList files in the `assemblyai_or_LT_jsons_to_seglsts/output_seglsts/` directory.
 * One IMPORTANT caveat is that currently the Assembly AI JSONs residing in the folder have no speaker mapping. The speakers are named as A, B, C... etc. so it's important that this mapping is added first.
+
+### 4. Upload SegLists to Files for Gecko
+
+Upload generated seglst files from *output\_seglsts* into the [Files for Gecko](https://drive.google.com/drive/folders/1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1) Drive folder. Conversation name(s) are **required**.
+
+```shell
+cd assemblyai_or_LT_jsons_to_seglsts/
+python upload_seglst_json_to_gecko_folder.py NV-AR-SS03-CONVO07
+python upload_seglst_json_to_gecko_folder.py NV-AR-SS03-CONVO07 NV-KO-SS03-CONVO07
+```
+
+* Uploads only `*.seglst.json` files from each local conversation folder.
+* If the conversation folder already exists on Drive, it prints a warning and skips that conversation (no overwrite).
+* Creates a new conversation folder on Drive when one does not exist yet.
+
+### 5. Copy channel WAVs to Files for Gecko
+
+After seglists are on Gecko, copy matching channel `.wav` files from the [AssemblyAI Transcripts](https://drive.google.com/drive/u/0/folders/1wceeL4NRLTXg57EIgV5peQPuDCBEthzl) Drive folder into the same conversation folders on [Files for Gecko](https://drive.google.com/drive/folders/1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1). Conversation name(s) are **required**.
+
+```shell
+cd assemblyai_or_LT_jsons_to_seglsts/
+python copy_channel_wavs_to_gecko_folder.py NV-AR-SS03-CONVO07
+python copy_channel_wavs_to_gecko_folder.py NV-AR-SS03-CONVO07 NV-KO-SS03-CONVO07
+```
+
+* Reads `*.seglst.json` on Gecko for each conversation and derives the speaker stem (e.g. `mohamed.h2@turing.com` from `mohamed.h2@turing.com.seglst.json`).
+* Finds `<speaker>.wav` in the AssemblyAI source folder on Drive (searches nested language/batch folders recursively, same layout as `download_jsons_from_drive.py`).
+* Copies each WAV into the Gecko conversation folder; replaces an existing WAV with the same name.
+* Warns and skips a speaker when the source WAV is missing on AssemblyAI Drive.
