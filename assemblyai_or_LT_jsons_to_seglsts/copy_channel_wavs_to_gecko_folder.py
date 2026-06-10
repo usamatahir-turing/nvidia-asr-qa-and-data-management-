@@ -94,6 +94,49 @@ def list_drive_subfolders(service, parent_id: str) -> dict[str, str]:
     return subfolders
 
 
+def build_recursive_folder_index(service, root_id: str) -> dict[str, str]:
+    """Return {folder_name: folder_id} for all folders under root (recursive).
+
+    Matches the nested AssemblyAI layout (language folders containing conversation
+    folders). When duplicate folder names exist, the first match is kept.
+    """
+    index: dict[str, str] = {}
+
+    def walk(parent_id: str) -> None:
+        page_token = None
+        query = (
+            f"'{parent_id}' in parents and mimeType = '{FOLDER_MIME}' "
+            "and trashed = false"
+        )
+        while True:
+            res = service.files().list(
+                q=query,
+                spaces="drive",
+                fields="nextPageToken, files(id, name)",
+                pageToken=page_token,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            for folder in res.get("files", []):
+                name = folder["name"]
+                folder_id = folder["id"]
+                if name in index:
+                    print(
+                        f"Warning: duplicate folder name '{name}' on AssemblyAI Drive "
+                        "— using first match.",
+                        file=sys.stderr,
+                    )
+                else:
+                    index[name] = folder_id
+                walk(folder_id)
+            page_token = res.get("nextPageToken")
+            if page_token is None:
+                break
+
+    walk(root_id)
+    return index
+
+
 def list_drive_files(service, folder_id: str) -> dict[str, dict[str, str]]:
     """Return {file_name: {id, mimeType}} for immediate children of a Drive folder."""
     files: dict[str, dict[str, str]] = {}
@@ -168,7 +211,8 @@ def process_conversation(
 
     if conversation not in assemblyai_subfolders:
         print(
-            f"Error: AssemblyAI Drive folder not found: {conversation}",
+            f"Error: AssemblyAI Drive folder not found under nested folders: "
+            f"{conversation}",
             file=sys.stderr,
         )
         return 0, 0, 0, 1
@@ -245,7 +289,10 @@ def main() -> int:
 
     try:
         service = get_authenticated_drive_service()
-        assemblyai_subfolders = list_drive_subfolders(service, ASSEMBLYAI_DRIVE_FOLDER_ID)
+        print("Indexing AssemblyAI Drive folders (recursive)...")
+        assemblyai_subfolders = build_recursive_folder_index(
+            service, ASSEMBLYAI_DRIVE_FOLDER_ID
+        )
         gecko_subfolders = list_drive_subfolders(service, GECKO_DRIVE_FOLDER_ID)
 
         total_copied = 0
