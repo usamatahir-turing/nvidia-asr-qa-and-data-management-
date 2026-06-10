@@ -194,6 +194,29 @@ The data will be pushed to the relevant subfolder in the drive [Files for Gecko]
 
 *Note: It’s important that for any uploading of data, the folder is in a Shared Drive location (not shared with me)*
 
+# Token Segment Density Check
+
+This script fixes bracket tokens in seglst files from *drive\_data*, then writes a CSV with per-segment counts of annotation tokens (e.g. `[inhale]`) versus regular words. Run it after [mirroring Drive](#mirror-drive) so *drive\_data* is up to date.
+
+### Usage
+
+```shell
+cd token_segment_density_check/
+python check_token_seg_density.py
+```
+
+Optional paths:
+
+```shell
+python check_token_seg_density.py --input ../drive_data
+python check_token_seg_density.py --fixed-output ./fixed_tokens_output_folder --csv-output ./token_segment_density.csv
+```
+
+* **Phase 1** — reads `*_fixed.seglst.json` and `*_approved.seglst.json` from each task folder under `--input` (default: *drive\_data*), applies the same token normalization as `fix_seglst_tokens.py`, and writes fixed copies to *token\_segment\_density\_check/fixed\_tokens\_output\_folder*.
+* **Phase 2** — scans the fixed output folder. For each speaker, prefers `*_approved.seglst.json` over `*_fixed.seglst.json` when both exist, then writes *token\_segment\_density\_check/token\_segment\_density.csv*.
+* **CSV columns** — `folder_name`, `file_name`, `session_id`, `speaker`, `words`, `start_time`, `end_time`, `duration`, `segment_index`, `number_of_token_words`, `number_of_non_token_words`.
+* Token words are text inside `[...]` spans; non-token words are the remaining words split on whitespace.
+
 # AssemblyAI or LT JSONs to SegLists
 
 This workflow is used to convert transcripts from AssemblyAI or the Labeling Tool (LT) into standardized SegList JSON files.
