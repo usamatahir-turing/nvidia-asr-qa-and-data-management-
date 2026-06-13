@@ -451,6 +451,13 @@ def _format_ms(seconds: float | None) -> str:
     return f"{seconds * 1000:+.0f}"
 
 
+def _format_timestamp(seconds: float) -> str:
+    """Format elapsed seconds as MM:SS.mmm for markdown tables."""
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes:02d}:{secs:06.3f}"
+
+
 def _boundary_issue(
     onset_err: float,
     offset_err: float,
@@ -665,13 +672,18 @@ def _render_boundary_table(failures: list[BoundaryFailure]) -> list[str]:
             else "—"
         )
         sig_on = (
-            f"{fail.signal_onset:.2f}" if fail.signal_onset is not None else "—"
+            _format_timestamp(fail.signal_onset)
+            if fail.signal_onset is not None
+            else "—"
         )
         sig_off = (
-            f"{fail.signal_offset:.2f}" if fail.signal_offset is not None else "—"
+            _format_timestamp(fail.signal_offset)
+            if fail.signal_offset is not None
+            else "—"
         )
         lines.append(
-            f"| {fail.segment_index} | {fail.start:.2f} | {fail.end:.2f} | "
+            f"| {fail.segment_index} | {_format_timestamp(fail.start)} | "
+            f"{_format_timestamp(fail.end)} | "
             f"{onset_cell} | {offset_cell} | {sig_on} | {sig_off} | "
             f"{fail.issue} | {fail.words_preview} |"
         )
@@ -688,10 +700,14 @@ def _nearest_annotations(
     parts: list[str] = []
     if before:
         idx, s, e = before[-1]
-        parts.append(f"after #{idx} ({s:.2f}–{e:.2f})")
+        parts.append(
+            f"after #{idx} ({_format_timestamp(s)}–{_format_timestamp(e)})"
+        )
     if after:
         idx, s, e = after[0]
-        parts.append(f"before #{idx} ({s:.2f}–{e:.2f})")
+        parts.append(
+            f"before #{idx} ({_format_timestamp(s)}–{_format_timestamp(e)})"
+        )
     if not parts:
         return "—"
     return " → ".join(parts)
@@ -708,7 +724,7 @@ def _render_uncovered_table(
     for item in uncovered:
         nearest = _nearest_annotations(item.start, item.end, annotations)
         lines.append(
-            f"| {item.start:.2f} | {item.end:.2f} | "
+            f"| {_format_timestamp(item.start)} | {_format_timestamp(item.end)} | "
             f"**{item.duration_ms:.0f} ms** | {nearest} |"
         )
     return lines
@@ -721,11 +737,13 @@ def _render_silence_table(issues: list[SilenceIssue]) -> list[str]:
     ]
     for issue in issues:
         gap_strs = ", ".join(
-            f"{g.start:.2f}–{g.end:.2f} ({g.duration_ms:.0f} ms)"
+            f"{_format_timestamp(g.start)}–{_format_timestamp(g.end)} "
+            f"({g.duration_ms:.0f} ms)"
             for g in issue.gaps
         )
         lines.append(
-            f"| {issue.segment_index} | {issue.seg_start:.2f} | {issue.seg_end:.2f} | "
+            f"| {issue.segment_index} | {_format_timestamp(issue.seg_start)} | "
+            f"{_format_timestamp(issue.seg_end)} | "
             f"**{issue.longest_ms:.0f} ms** | {gap_strs} | {issue.words_preview} |"
         )
     return lines
@@ -781,7 +799,8 @@ def render_speaker_section(
         lines.append("|---|------:|----:|-------|")
         for item in spk.no_signal_overlap:
             lines.append(
-                f"| {item.segment_index} | {item.start:.2f} | {item.end:.2f} | {item.words_preview} |"
+                f"| {item.segment_index} | {_format_timestamp(item.start)} | "
+                f"{_format_timestamp(item.end)} | {item.words_preview} |"
             )
         lines.append("")
 
