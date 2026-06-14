@@ -184,11 +184,27 @@ cd segment_quality_report_gen/
 python push_reports_to_drive.py --variant fixed
 ```
 
+To upload reports for specific conversations only:
+
+```shell
+python push_reports_to_drive.py --variant fixed NV-AR-SS03-CONVO07
+python push_reports_to_drive.py --variant fixed NV-AR-SS03-CONVO07 NV-KO-SS03-CONVO07
+```
+
 For uploading reports ran on the approved Seglists:
 
 ```shell
 python push_reports_to_drive.py --variant approved
 ```
+
+To upload approved reports for specific conversations only:
+
+```shell
+python push_reports_to_drive.py --variant approved NV-AR-SS03-CONVO07 NV-KO-SS03-CONVO07
+```
+
+* When conversation id(s) are provided, only `reports_<variant>/<CONVERSATION>_<variant>.md` files are uploaded to the matching Drive subfolder.
+* When omitted, all `*_<variant>.md` files in `reports_fixed/` or `reports_approved/` are uploaded.
 
 The data will be pushed to the relevant subfolder in the drive [Files for Gecko](https://drive.google.com/drive/folders/1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1)
 

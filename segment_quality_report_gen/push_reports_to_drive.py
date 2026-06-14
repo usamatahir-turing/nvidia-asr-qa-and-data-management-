@@ -73,11 +73,34 @@ def get_file_id(service, parent_id, file_name):
         return None
     return files[0]['id']
 
-def push_reports(variant):
+def push_reports(variant, conversations=None):
     source_dir = os.path.join(SCRIPT_DIR, f'reports_{variant}')
     if not os.path.exists(source_dir):
         print(f"Error: Source directory {source_dir} does not exist.")
         return
+
+    if conversations:
+        filenames = [f"{conversation}_{variant}.md" for conversation in conversations]
+        missing = [
+            name
+            for name in filenames
+            if not os.path.isfile(os.path.join(source_dir, name))
+        ]
+        if missing:
+            print(
+                f"Error: report file(s) not found under {source_dir}: "
+                f"{', '.join(missing)}"
+            )
+            return
+    else:
+        filenames = sorted(
+            name
+            for name in os.listdir(source_dir)
+            if name.endswith(f'_{variant}.md')
+        )
+        if not filenames:
+            print(f"Error: no *_{variant}.md files found in {source_dir}.")
+            return
 
     service = get_authenticated_drive_service()
     
@@ -93,10 +116,7 @@ def push_reports(variant):
     ).execute()
     drive_subfolders = {f['name']: f['id'] for f in results.get('files', [])}
 
-    for filename in os.listdir(source_dir):
-        if not filename.endswith(f'_{variant}.md'):
-            continue
-            
+    for filename in filenames:
         file_path = os.path.join(source_dir, filename)
         # Extract subfolder name: NV-AR-SS03-CONVO07_approved.md -> NV-AR-SS03-CONVO07
         subfolder_name = filename.rsplit('_', 1)[0]
@@ -134,12 +154,27 @@ def push_reports(variant):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Push quality reports to Google Drive.")
-    parser.add_argument("--variant", choices=['fixed', 'approved'], required=True, help="The variant of reports to upload (fixed or approved).")
+    parser.add_argument(
+        "--variant",
+        choices=['fixed', 'approved'],
+        required=True,
+        help="The variant of reports to upload (fixed or approved).",
+    )
+    parser.add_argument(
+        "conversations",
+        nargs="*",
+        metavar="CONVERSATION",
+        help=(
+            "Conversation id(s) to upload (e.g. NV-AR-SS03-CONVO07). "
+            "Uploads reports_<variant>/<CONVERSATION>_<variant>.md. "
+            "Upload all reports in the folder when omitted."
+        ),
+    )
     
     args = parser.parse_args()
     
     try:
-        push_reports(args.variant)
+        push_reports(args.variant, args.conversations or None)
         print("\nAll tasks completed.")
     except Exception as e:
         print(f"\nAn error occurred: {e}")
