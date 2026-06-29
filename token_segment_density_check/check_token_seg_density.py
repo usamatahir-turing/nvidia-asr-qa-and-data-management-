@@ -49,6 +49,29 @@ _TRAILING_ORPHAN_BRACKET_RE = re.compile(r"\[$")
 _SPLIT_BRACKET_RE = re.compile(r"\[([a-z])\[([a-z-]+)\]")
 _TOKEN_SPAN_RE = re.compile(r"\[[^\]]*\]")
 
+# Misspelling -> canonical token text (applied after bracket and hyphen normalization).
+TOKEN_SPELLING_FIXES: dict[str, str] = {
+    # -> unintelligible
+    "inintelligible": "unintelligible",
+    "ununtelligible": "unintelligible",
+    "unintelliglible": "unintelligible",
+    "uninteligible": "unintelligible",
+    "unintelligeble": "unintelligible",
+    "unintelligibble": "unintelligible",
+    "unintelliggible": "unintelligible",
+    "unintgelligible": "unintelligible",
+    "unitelligible": "unintelligible",
+    "unintillegible": "unintelligible",
+    "unintelligibile": "unintelligible",
+    "untintelligible": "unintelligible",
+    "unintelligble": "unintelligible",
+    "inuntelligible": "unintelligible",
+    # -> inhale
+    "nhale": "inhale",
+    "inahel": "inhale",
+    "inahle": "inhale",
+}
+
 CSV_COLUMNS = (
     "folder_name",
     "file_name",
@@ -70,7 +93,8 @@ def normalize_token_content(content: str) -> str:
     text = re.sub(r"\s*-\s*", "-", text)
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text)
-    return text.lower()
+    text = text.lower()
+    return TOKEN_SPELLING_FIXES.get(text, text)
 
 
 def _repair_split_brackets(words: str) -> str:

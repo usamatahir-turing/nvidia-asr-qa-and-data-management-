@@ -27,6 +27,7 @@ Token fixes applied to each segment's ``words`` field:
 - Remove space after ``[``: ``[ exhale]`` -> ``[exhale]``
 - Hyphenate compounds: ``other- noise``, ``other - noise``, ``[other noise]`` -> ``[other-noise]``
 - Lowercase token text inside brackets
+- Correct common token misspellings (see ``TOKEN_SPELLING_FIXES``)
 
 ``session_id`` is set to the parent task folder name (e.g. ``NV-KO-SS03-CONVO08``).
 
@@ -63,6 +64,29 @@ _TRAILING_ORPHAN_BRACKET_RE = re.compile(r"\[$")
 # Repair accidental ``[i[nhale]`` corruption from an earlier regex-based pass.
 _SPLIT_BRACKET_RE = re.compile(r"\[([a-z])\[([a-z-]+)\]")
 
+# Misspelling -> canonical token text (applied after bracket and hyphen normalization).
+TOKEN_SPELLING_FIXES: dict[str, str] = {
+    # -> unintelligible
+    "inintelligible": "unintelligible",
+    "ununtelligible": "unintelligible",
+    "unintelliglible": "unintelligible",
+    "uninteligible": "unintelligible",
+    "unintelligeble": "unintelligible",
+    "unintelligibble": "unintelligible",
+    "unintelliggible": "unintelligible",
+    "unintgelligible": "unintelligible",
+    "unitelligible": "unintelligible",
+    "unintillegible": "unintelligible",
+    "unintelligibile": "unintelligible",
+    "untintelligible": "unintelligible",
+    "unintelligble": "unintelligible",
+    "inuntelligible": "unintelligible",
+    # -> inhale
+    "nhale": "inhale",
+    "inahel": "inhale",
+    "inahle": "inhale",
+}
+
 
 def normalize_token_content(content: str) -> str:
     """Normalize the interior of a bracket token."""
@@ -70,7 +94,8 @@ def normalize_token_content(content: str) -> str:
     text = re.sub(r"\s*-\s*", "-", text)
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text)
-    return text.lower()
+    text = text.lower()
+    return TOKEN_SPELLING_FIXES.get(text, text)
 
 
 def _repair_split_brackets(words: str) -> str:
