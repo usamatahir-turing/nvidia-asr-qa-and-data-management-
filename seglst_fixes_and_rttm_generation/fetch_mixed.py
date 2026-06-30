@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import defaultdict
 
 import google.auth
 import requests
@@ -117,13 +118,9 @@ def is_mixed_wav(filename: str) -> bool:
     return filename.endswith(MIXED_WAV_SUFFIX)
 
 
-def find_folders_by_name_recursive(
-    service,
-    root_id: str,
-    folder_name: str,
-) -> list[str]:
-    """Return folder ids under root whose name equals folder_name (recursive)."""
-    matches: list[str] = []
+def build_assemblyai_folder_index(service, root_id: str) -> dict[str, list[str]]:
+    """Return {folder_name: [folder_id, ...]} for all folders under root (one walk)."""
+    index: dict[str, list[str]] = defaultdict(list)
 
     def walk(parent_id: str) -> None:
         page_token = None
@@ -141,15 +138,14 @@ def find_folders_by_name_recursive(
                 includeItemsFromAllDrives=True,
             ).execute()
             for folder in res.get("files", []):
-                if folder["name"] == folder_name:
-                    matches.append(folder["id"])
+                index[folder["name"]].append(folder["id"])
                 walk(folder["id"])
             page_token = res.get("nextPageToken")
             if page_token is None:
                 break
 
     walk(root_id)
-    return matches
+    return dict(index)
 
 
 def discover_mixed_wav_files(
@@ -181,6 +177,7 @@ def process_conversation(
     service,
     conversation: str,
     dest_folder_id: str,
+    assemblyai_folder_index: dict[str, list[str]],
 ) -> str:
     """Process one conversation. Returns a result label for stats."""
     dest_files = list_drive_files(service, dest_folder_id)
@@ -193,11 +190,7 @@ def process_conversation(
         )
         return "skipped_existing"
 
-    source_folder_ids = find_folders_by_name_recursive(
-        service,
-        ASSEMBLYAI_DRIVE_FOLDER_ID,
-        conversation,
-    )
+    source_folder_ids = assemblyai_folder_index.get(conversation, [])
     if not source_folder_ids:
         print(
             f"Warning: no AssemblyAI Drive folder found for {conversation} — skipping.",
@@ -250,6 +243,12 @@ def main() -> int:
             print("Error: no conversation folders found on pre-delivery Drive.", file=sys.stderr)
             return 1
 
+        print("Indexing AssemblyAI Drive folders (recursive)...")
+        assemblyai_folder_index = build_assemblyai_folder_index(
+            service, ASSEMBLYAI_DRIVE_FOLDER_ID
+        )
+        print(f"Indexed {len(assemblyai_folder_index)} unique folder name(s).")
+
         stats: dict[str, int] = {}
         for conversation in sorted(dest_subfolders):
             print(f"\n--- {conversation} ---")
@@ -257,6 +256,7 @@ def main() -> int:
                 service,
                 conversation,
                 dest_subfolders[conversation],
+                assemblyai_folder_index,
             )
             stats[result] = stats.get(result, 0) + 1
 
