@@ -87,7 +87,7 @@ def abbreviation_recommendation(canonical: str | None, *, is_stutter: bool = Fal
     if is_stutter:
         return STUTTER_RECOMMENDATION
     if canonical:
-        return f"Use canonical acronym form: {canonical}"
+        return f"Listen and use the canonicalspoken-form of the word. Potential correct canonical acronym form: {canonical}"
     return SPOKEN_FORM_RECOMMENDATION
 
 _COMPACT_SYMBOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
