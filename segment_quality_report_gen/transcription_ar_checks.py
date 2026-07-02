@@ -432,11 +432,13 @@ def _is_letter_hyphen_acronym(text: str) -> bool:
 
 
 def _stutter_hyphen_spaced_form(token: str, *, raw: str | None = None) -> str | None:
-    """Return spaced stutter form (``I-I-`` → ``I- I-``) when letters repeat."""
+    """Return spaced stutter form (``I-I-`` → ``I- I-``) for ASCII letter repeats."""
     parts = [part for part in token.split("-") if part]
     if len(parts) < 2:
         return None
-    if not all(len(part) == 1 and part.isalpha() for part in parts):
+    if not all(
+        len(part) == 1 and part.isascii() and part.isalpha() for part in parts
+    ):
         return None
     if len({part.lower() for part in parts}) != 1:
         return None
@@ -490,11 +492,12 @@ def _overlaps_compact_symbol_span(words: str, start: int, end: int) -> bool:
 
 def find_noncanonical_abbreviations(
     words: str,
+    language: str | None = None,
 ) -> list[tuple[str, str | None, bool]]:
     """Return ``(detected, canonical, is_stutter)`` abbreviation / compact-form issues.
 
     * ``canonical`` set — non-canonical dot acronym spelling (``F.B.I.`` → ``FBI``).
-    * ``canonical`` set, ``is_stutter`` — hyphen stutter (``I-I-`` → ``I- I-``).
+    * ``canonical`` set, ``is_stutter`` — hyphen stutter (``I-I-`` → ``I- I-``); skipped for JA.
     * ``canonical`` None — alphanumeric compact (``5G``) or ordinal (``1st``).
     """
     findings: list[tuple[str, str | None, bool]] = []
@@ -528,7 +531,9 @@ def find_noncanonical_abbreviations(
         if not core:
             continue
 
-        stutter_form = _stutter_hyphen_spaced_form(core, raw=raw)
+        stutter_form = None
+        if language != "JA":
+            stutter_form = _stutter_hyphen_spaced_form(core, raw=raw)
         if stutter_form is not None:
             add_finding(start, end, raw, stutter_form, is_stutter=True)
             continue
@@ -698,7 +703,9 @@ def analyze_speaker_transcription(
                 )
             )
 
-        for detected, canonical, is_stutter in find_noncanonical_abbreviations(words):
+        for detected, canonical, is_stutter in find_noncanonical_abbreviations(
+            words, language
+        ):
             report.abbreviation_findings.append(
                 AbbreviationFinding(
                     segment_index=idx,
