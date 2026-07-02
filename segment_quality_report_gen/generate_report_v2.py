@@ -1677,11 +1677,19 @@ def main() -> None:
             ),
             encoding="utf-8",
         )
+        numeric_count = transcription.numeric_count if transcription else 0
+        unknown_nsv_count = transcription.unknown_nsv_count if transcription else 0
+        symbol_count = transcription.symbol_count if transcription else 0
+        filler_count = transcription.filler_count if transcription else 0
+        abbreviation_count = transcription.abbreviation_count if transcription else 0
         print(
             f"  -> {out_path.name}: "
             f"{report.boundary_count} boundary / {report.silence_count} silence / "
             f"{report.uncovered_count} uncovered / {report.no_signal_count} no-signal "
-            f"failure(s) / {report.segment_count} segments",
+            f"failure(s) / {report.segment_count} segments / "
+            f"{numeric_count} numeric / {unknown_nsv_count} unknown NSV / "
+            f"{symbol_count} compact symbols / {filler_count} fillers / "
+            f"{abbreviation_count} abbreviations",
             flush=True,
         )
 

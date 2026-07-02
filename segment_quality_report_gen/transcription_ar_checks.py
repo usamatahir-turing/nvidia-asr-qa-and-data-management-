@@ -6,8 +6,9 @@ Detects:
   2. Unknown NSV tokens (bracket annotations not in the allowed list).
   3. Compact written symbols (@ . / : -) in URLs, emails, paths, etc.
   4. Non-canonical filler words (language-specific, from task folder code).
+  5. Non-canonical abbreviations, alphanumeric compact forms, and ordinals.
 
-Used by ``generate_report.py`` to append a *Transcription Words Report* section.
+Used by ``generate_report_v2.py`` to append a *Transcription Words Report* section.
 """
 
 from __future__ import annotations
@@ -67,10 +68,23 @@ UNKNOWN_NSV_RECOMMENDATION = (
     "Non-canonical NSV found. Fix the spelling or use the common canonical form."
 )
 SYMBOLS_RECOMMENDATION = "Listen to the audio to ensure it's written in spoken form"
+SPOKEN_FORM_RECOMMENDATION = "Listen to the audio and change to the spoken-form"
+
+_DOT_ACRONYM_RE = re.compile(r"^[A-Za-z](?:\.[A-Za-z])+\.?$")
+_HYPHEN_ACRONYM_RE = re.compile(r"^(?:[A-Za-z]-){1,}[A-Za-z]$")
+_ORDINAL_RE = re.compile(r"^\d+(?:st|nd|rd|th)$", re.IGNORECASE)
+_ALPHANUMERIC_COMPACT_RE = re.compile(r"^(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9]+$")
+_PRO_SPAN_RE = re.compile(r"\{PRO:\s*[^}]+\}")
 
 
 def filler_recommendation(canonical: str) -> str:
     return f"Use canonical filler form: {canonical}"
+
+
+def abbreviation_recommendation(canonical: str | None) -> str:
+    if canonical:
+        return f"Use canonical acronym form: {canonical}"
+    return SPOKEN_FORM_RECOMMENDATION
 
 _COMPACT_SYMBOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
@@ -140,6 +154,16 @@ class FillerFinding:
 
 
 @dataclass
+class AbbreviationFinding:
+    segment_index: int
+    start: float
+    end: float
+    detected: str
+    canonical: str | None
+    words_preview: str
+
+
+@dataclass
 class SpeakerTranscriptionReport:
     speaker_id: str
     seglst_path: Path
@@ -147,6 +171,7 @@ class SpeakerTranscriptionReport:
     unknown_nsv_findings: list[UnknownNsvFinding] = field(default_factory=list)
     symbol_findings: list[SymbolFinding] = field(default_factory=list)
     filler_findings: list[FillerFinding] = field(default_factory=list)
+    abbreviation_findings: list[AbbreviationFinding] = field(default_factory=list)
 
 
 @dataclass
@@ -169,6 +194,10 @@ class TaskTranscriptionReport:
     @property
     def filler_count(self) -> int:
         return sum(len(s.filler_findings) for s in self.speakers)
+
+    @property
+    def abbreviation_count(self) -> int:
+        return sum(len(s.abbreviation_findings) for s in self.speakers)
 
 
 def _seglst_suffix(variant: str) -> str:
@@ -379,6 +408,135 @@ def _is_inside_bracket_span(words: str, start: int, end: int) -> bool:
     return False
 
 
+def _pro_spans(words: str) -> list[tuple[int, int]]:
+    return [(match.start(), match.end()) for match in _PRO_SPAN_RE.finditer(words)]
+
+
+def _is_inside_pro_span(words: str, start: int, end: int) -> bool:
+    for span_start, span_end in _pro_spans(words):
+        if start >= span_start and end <= span_end:
+            return True
+    return False
+
+
+def _is_letter_hyphen_acronym(text: str) -> bool:
+    parts = text.split("-")
+    return len(parts) >= 2 and all(len(part) == 1 and part.isalpha() for part in parts)
+
+
+def _canonical_acronym(token: str) -> str:
+    return re.sub(r"[.\-\s]", "", token).upper()
+
+
+def _is_dot_acronym(token: str) -> bool:
+    if not _DOT_ACRONYM_RE.fullmatch(token):
+        return False
+    return len(_canonical_acronym(token)) >= 2
+
+
+def _is_single_uppercase_letter(token_core: str) -> bool:
+    return (
+        len(token_core) == 1
+        and token_core.isascii()
+        and token_core.isalpha()
+        and token_core.isupper()
+    )
+
+
+def _find_spaced_letter_acronym_spans(words: str) -> list[tuple[int, int, str, str]]:
+    """Find ``F B I``-style runs of standalone uppercase single-letter tokens."""
+    tokens: list[tuple[int, int, str, str]] = []
+    for match in re.finditer(r"\S+", words):
+        raw = match.group()
+        core = _WORD_EDGE_PUNCT_RE.sub("", raw)
+        tokens.append((match.start(), match.end(), raw, core))
+
+    spans: list[tuple[int, int, str, str]] = []
+    index = 0
+    while index < len(tokens):
+        run_start = index
+        while index < len(tokens) and _is_single_uppercase_letter(tokens[index][3]):
+            index += 1
+        run_len = index - run_start
+        if run_len >= 2:
+            span_start = tokens[run_start][0]
+            span_end = tokens[index - 1][1]
+            detected = words[span_start:span_end]
+            canonical = "".join(tokens[pos][3] for pos in range(run_start, index))
+            spans.append((span_start, span_end, detected, canonical))
+        else:
+            index = run_start + 1
+    return spans
+
+
+def _overlaps_compact_symbol_span(words: str, start: int, end: int) -> bool:
+    for label, pattern in _COMPACT_SYMBOL_PATTERNS:
+        for match in pattern.finditer(words):
+            span_start, span_end = match.span()
+            text = match.group()
+            if label == "slug" and _is_letter_hyphen_acronym(text):
+                continue
+            if _is_inside_bracket_span(words, span_start, span_end):
+                continue
+            if label == "ip" and not _valid_ip_address(text):
+                continue
+            if label in {"file_path", "domain_path"} and _is_common_slash_phrase(text):
+                continue
+            if label == "handle" and "@" in text[1:] and "." in text:
+                continue
+            if not (end <= span_start or start >= span_end):
+                return True
+    return False
+
+
+def find_noncanonical_abbreviations(words: str) -> list[tuple[str, str | None]]:
+    """Return ``(detected, canonical)`` pairs for abbreviation / compact-form issues.
+
+    * ``canonical`` set — non-canonical acronym spelling (``F.B.I.`` → ``FBI``).
+    * ``canonical`` None — alphanumeric compact (``5G``) or ordinal (``1st``).
+    """
+    findings: list[tuple[str, str | None]] = []
+    seen_spans: set[tuple[int, int]] = set()
+
+    def add_finding(start: int, end: int, detected: str, canonical: str | None) -> None:
+        if (start, end) in seen_spans:
+            return
+        if _is_inside_bracket_span(words, start, end):
+            return
+        if _is_inside_pro_span(words, start, end):
+            return
+        if _overlaps_compact_symbol_span(words, start, end):
+            return
+        seen_spans.add((start, end))
+        findings.append((detected, canonical))
+
+    for span_start, span_end, detected, canonical in _find_spaced_letter_acronym_spans(words):
+        add_finding(span_start, span_end, detected, canonical)
+
+    for match in re.finditer(r"\S+", words):
+        raw = match.group()
+        start, end = match.span()
+        if (start, end) in seen_spans:
+            continue
+        core = _WORD_EDGE_PUNCT_RE.sub("", raw)
+        if not core:
+            continue
+
+        canonical: str | None = None
+        if _is_dot_acronym(core) or _is_letter_hyphen_acronym(core):
+            canonical = _canonical_acronym(core)
+        elif _ORDINAL_RE.fullmatch(core):
+            canonical = None
+        elif _ALPHANUMERIC_COMPACT_RE.fullmatch(core):
+            canonical = None
+        else:
+            continue
+
+        add_finding(start, end, raw, canonical)
+
+    return findings
+
+
 def _valid_ip_address(text: str) -> bool:
     parts = text.split(".")
     if len(parts) != 4:
@@ -438,6 +596,8 @@ def find_compact_symbol_spans(words: str) -> list[str]:
             if label in {"file_path", "domain_path"} and _is_common_slash_phrase(text):
                 continue
             if label == "handle" and "@" in text[1:] and "." in text:
+                continue
+            if label == "slug" and _is_letter_hyphen_acronym(text):
                 continue
             matches.append((start, end, text))
 
@@ -516,6 +676,18 @@ def analyze_speaker_transcription(
         ):
             report.filler_findings.append(
                 FillerFinding(
+                    segment_index=idx,
+                    start=start,
+                    end=end,
+                    detected=detected,
+                    canonical=canonical,
+                    words_preview=_format_words_with_highlight(words, detected),
+                )
+            )
+
+        for detected, canonical in find_noncanonical_abbreviations(words):
+            report.abbreviation_findings.append(
+                AbbreviationFinding(
                     segment_index=idx,
                     start=start,
                     end=end,
@@ -645,6 +817,40 @@ def _render_fillers_table(report: TaskTranscriptionReport) -> list[str]:
     return lines
 
 
+def _render_abbreviations_table(report: TaskTranscriptionReport) -> list[str]:
+    lines = [
+        "## Abbreviations and Initialisms",
+        "",
+        "| Speaker | # | start | end | detected | canonical | words | recommendation |",
+        "|---------|--:|------:|----:|----------|-----------|-------|----------------|",
+    ]
+    rows = 0
+    for speaker in report.speakers:
+        for finding in speaker.abbreviation_findings:
+            detected = finding.detected.replace("|", "\\|").replace("`", "")
+            canonical = (
+                finding.canonical.replace("|", "\\|").replace("`", "")
+                if finding.canonical
+                else "—"
+            )
+            lines.append(
+                f"| {speaker.speaker_id} | {finding.segment_index} | "
+                f"{_format_timestamp(finding.start)} | {_format_timestamp(finding.end)} | "
+                f"`{detected}` | `{canonical}` | {finding.words_preview} | "
+                f"{abbreviation_recommendation(finding.canonical)} |"
+            )
+            rows += 1
+    if rows == 0:
+        return [
+            "## Abbreviations and Initialisms",
+            "",
+            "*No abbreviation or compact-form issues detected.*",
+            "",
+        ]
+    lines.append("")
+    return lines
+
+
 def render_transcription_words_report(report: TaskTranscriptionReport) -> list[str]:
     """Return markdown lines for the Transcription Words Report section."""
     lines = [
@@ -653,11 +859,13 @@ def render_transcription_words_report(report: TaskTranscriptionReport) -> list[s
         f"- Numeric words: **{report.numeric_count}** | "
         f"Unknown NSV tokens: **{report.unknown_nsv_count}** | "
         f"Compact symbols: **{report.symbol_count}** | "
-        f"Non-canonical Fillers: **{report.filler_count}**",
+        f"Non-canonical Fillers: **{report.filler_count}** | "
+        f"Abbreviations / compact forms: **{report.abbreviation_count}**",
         "",
     ]
     lines.extend(_render_numbers_table(report))
     lines.extend(_render_unknown_nsv_table(report))
     lines.extend(_render_symbols_table(report))
     lines.extend(_render_fillers_table(report))
+    lines.extend(_render_abbreviations_table(report))
     return lines
