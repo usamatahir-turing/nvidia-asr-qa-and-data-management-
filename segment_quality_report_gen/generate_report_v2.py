@@ -1689,7 +1689,7 @@ def main() -> None:
             f"failure(s) / {report.segment_count} segments / "
             f"{numeric_count} numeric / {unknown_nsv_count} unknown NSV / "
             f"{symbol_count} compact symbols / {filler_count} fillers / "
-            f"{abbreviation_count} abbreviations",
+            f"{abbreviation_count} acronyms/stutters",
             flush=True,
         )
 

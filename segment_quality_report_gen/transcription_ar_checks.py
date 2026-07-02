@@ -833,7 +833,7 @@ def _render_fillers_table(report: TaskTranscriptionReport) -> list[str]:
 
 def _render_abbreviations_table(report: TaskTranscriptionReport) -> list[str]:
     lines = [
-        "## Abbreviations and Initialisms",
+        "## Acronyms and Stutters",
         "",
         "| Speaker | # | start | end | detected | canonical | words | recommendation |",
         "|---------|--:|------:|----:|----------|-----------|-------|----------------|",
@@ -856,9 +856,9 @@ def _render_abbreviations_table(report: TaskTranscriptionReport) -> list[str]:
             rows += 1
     if rows == 0:
         return [
-            "## Abbreviations and Initialisms",
+            "## Acronyms and Stutters",
             "",
-            "*No abbreviation or compact-form issues detected.*",
+            "*No acronym or stutter issues detected.*",
             "",
         ]
     lines.append("")
@@ -874,7 +874,7 @@ def render_transcription_words_report(report: TaskTranscriptionReport) -> list[s
         f"Unknown NSV tokens: **{report.unknown_nsv_count}** | "
         f"Compact symbols: **{report.symbol_count}** | "
         f"Non-canonical Fillers: **{report.filler_count}** | "
-        f"Abbreviations / compact forms: **{report.abbreviation_count}**",
+        f"Acronyms and stutters: **{report.abbreviation_count}**",
         "",
     ]
     lines.extend(_render_numbers_table(report))
