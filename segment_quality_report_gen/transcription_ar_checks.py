@@ -528,18 +528,25 @@ def analyze_speaker_transcription(
     return report
 
 
-def analyze_task_transcription(task_dir: Path, variant: str) -> TaskTranscriptionReport | None:
-    pairs = discover_seglst_files(task_dir, variant)
-    if not pairs:
+def analyze_task_transcription_pairs(
+    task_id: str,
+    speaker_seglst_pairs: list[tuple[str, Path]],
+) -> TaskTranscriptionReport | None:
+    if not speaker_seglst_pairs:
         return None
 
-    language = language_from_task_id(task_dir.name)
-    task = TaskTranscriptionReport(task_id=task_dir.name)
-    for speaker_id, seglst_path in pairs:
+    language = language_from_task_id(task_id)
+    task = TaskTranscriptionReport(task_id=task_id)
+    for speaker_id, seglst_path in speaker_seglst_pairs:
         task.speakers.append(
             analyze_speaker_transcription(speaker_id, seglst_path, language)
         )
     return task
+
+
+def analyze_task_transcription(task_dir: Path, variant: str) -> TaskTranscriptionReport | None:
+    pairs = discover_seglst_files(task_dir, variant)
+    return analyze_task_transcription_pairs(task_dir.name, pairs)
 
 
 def _render_numbers_table(report: TaskTranscriptionReport) -> list[str]:
