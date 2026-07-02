@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""Transcription annotation review checks for seglst JSON files.
+
+Detects:
+  1. Numeric words (digits-only tokens that should be spoken-form).
+  2. Unknown NSV tokens (bracket annotations not in the allowed list).
+  3. Compact written symbols (@ . / : -) in URLs, emails, paths, etc.
+  4. Non-canonical filler words (language-specific, from task folder code).
+
+Used by ``generate_report.py`` to append a *Transcription Words Report* section.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator
+
+from filler_word_rules import find_noncanonical_fillers, language_from_task_id
+
+ALLOWED_NSVS = frozenset(
+    {
+        "breath",
+        "inhale",
+        "exhale",
+        "sigh",
+        "sniff",
+        "gasp",
+        "blow",
+        "laugh",
+        "chuckle",
+        "giggle",
+        "snort",
+        "scoff",
+        "grunt",
+        "groan",
+        "cry",
+        "hum-tune",
+        "whoop",
+        "whistle",
+        "tongue-click",
+        "tsk",
+        "lip-smack",
+        "teeth-suck",
+        "lip-trill",
+        "shush",
+        "swallow",
+        "clear-throat",
+        "cough",
+        "sneeze",
+        "yawn",
+        "hiccup",
+        "unintelligible",
+        "other-noise",
+        "click"
+    }
+)
+
+NUMERIC_WORD_RE = re.compile(r"^\d+$")
+_TOKEN_BODY_RE = re.compile(r"^[A-Za-z]+(?:-\s*[A-Za-z]+|\s+[A-Za-z]+)*$")
+_WORD_EDGE_PUNCT_RE = re.compile(r"^[^\w]+|[^\w]+$")
+
+NUMBERS_RECOMMENDATION = "Listen to the audio and change to the spoken-form"
+UNKNOWN_NSV_RECOMMENDATION = (
+    "Non-canonical NSV found. Fix the spelling or use the common canonical form."
+)
+SYMBOLS_RECOMMENDATION = "Listen to the audio to ensure it's written in spoken form"
+
+
+def filler_recommendation(canonical: str) -> str:
+    return f"Use canonical filler form: {canonical}"
+
+_COMPACT_SYMBOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("url", re.compile(r"\bhttps?://\S+", re.IGNORECASE)),
+    ("www", re.compile(r"\bwww\.[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", re.IGNORECASE)),
+    (
+        "domain_path",
+        re.compile(r"\b[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z]{2,}/\S+"),
+    ),
+    ("ip", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
+    ("windows_path", re.compile(r"\b[A-Za-z]:\\(?:[^\\\s]+\\?)+")),
+    (
+        "unix_path",
+        re.compile(r"\b(?:/[A-Za-z0-9._-]+){2,}(?:/[A-Za-z0-9._-]+)*\b"),
+    ),
+    (
+        "file_path",
+        re.compile(
+            r"\b[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*){2,}\b"
+        ),
+    ),
+    ("handle", re.compile(r"(?<!\w)@[A-Za-z_][A-Za-z0-9_]{1,}\b")),
+    ("host_port", re.compile(r"\b[A-Za-z][A-Za-z0-9.-]*:\d{2,5}\b")),
+    (
+        "domain",
+        re.compile(r"\b[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z]{2,}\b"),
+    ),
+    ("slug", re.compile(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+){2,}\b")),
+)
+
+
+@dataclass
+class NumericFinding:
+    segment_index: int
+    start: float
+    end: float
+    detected: str
+    words_preview: str
+
+
+@dataclass
+class UnknownNsvFinding:
+    segment_index: int
+    start: float
+    end: float
+    detected: str
+    words_preview: str
+
+
+@dataclass
+class SymbolFinding:
+    segment_index: int
+    start: float
+    end: float
+    detected: str
+    words_preview: str
+
+
+@dataclass
+class FillerFinding:
+    segment_index: int
+    start: float
+    end: float
+    detected: str
+    canonical: str
+    words_preview: str
+
+
+@dataclass
+class SpeakerTranscriptionReport:
+    speaker_id: str
+    seglst_path: Path
+    numeric_findings: list[NumericFinding] = field(default_factory=list)
+    unknown_nsv_findings: list[UnknownNsvFinding] = field(default_factory=list)
+    symbol_findings: list[SymbolFinding] = field(default_factory=list)
+    filler_findings: list[FillerFinding] = field(default_factory=list)
+
+
+@dataclass
+class TaskTranscriptionReport:
+    task_id: str
+    speakers: list[SpeakerTranscriptionReport] = field(default_factory=list)
+
+    @property
+    def numeric_count(self) -> int:
+        return sum(len(s.numeric_findings) for s in self.speakers)
+
+    @property
+    def unknown_nsv_count(self) -> int:
+        return sum(len(s.unknown_nsv_findings) for s in self.speakers)
+
+    @property
+    def symbol_count(self) -> int:
+        return sum(len(s.symbol_findings) for s in self.speakers)
+
+    @property
+    def filler_count(self) -> int:
+        return sum(len(s.filler_findings) for s in self.speakers)
+
+
+def _seglst_suffix(variant: str) -> str:
+    return f"_{variant}.seglst.json"
+
+
+def _pair_regex(variant: str) -> re.Pattern[str]:
+    return re.compile(rf"^(.+)_{re.escape(variant)}\.seglst\.json$", re.IGNORECASE)
+
+
+def _parse_time(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return float(str(value).strip())
+
+
+def _escape_md_table_cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
+def _find_numeric_raw_token(words: str, core: str) -> str | None:
+    for raw in words.split():
+        if not raw:
+            continue
+        if _WORD_EDGE_PUNCT_RE.sub("", raw) == core:
+            return raw
+    return None
+
+
+def _truncate_keeping_range(text: str, range_start: int, range_end: int, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+
+    highlight_len = range_end - range_start
+    if highlight_len >= max_len:
+        return text[range_start:range_end]
+
+    extra = max_len - highlight_len
+    before = extra // 2
+    after = extra - before
+
+    start = max(0, range_start - before)
+    end = min(len(text), range_end + after)
+
+    while end - start < max_len:
+        expanded = False
+        if start > 0:
+            start -= 1
+            expanded = True
+        if end - start >= max_len:
+            break
+        if end < len(text):
+            end += 1
+            expanded = True
+        if end - start >= max_len or not expanded:
+            break
+
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return prefix + text[start:end] + suffix
+
+
+def _format_words_with_highlight(
+    words: str,
+    issue: str,
+    *,
+    max_len: int = 72,
+) -> str:
+    """Return segment text with the issue wrapped in markdown bold, kept visible."""
+    if not words.strip():
+        return _escape_md_table_cell(f"**{issue}**")
+
+    highlight = issue
+    start = words.find(highlight)
+    if start == -1:
+        raw_numeric = _find_numeric_raw_token(words, issue)
+        if raw_numeric is not None:
+            highlight = raw_numeric
+            start = words.find(highlight)
+
+    if start == -1:
+        display = f"**{issue}** — {_words_preview(words, max_len=max(24, max_len - len(issue) - 5))}"
+        return _escape_md_table_cell(display)
+
+    end = start + len(highlight)
+    highlighted = f"{words[:start]}**{highlight}**{words[end:]}"
+    bold_start = start
+    bold_end = start + 2 + len(highlight) + 2
+    display = _truncate_keeping_range(highlighted, bold_start, bold_end, max_len)
+    return _escape_md_table_cell(display)
+
+
+def _words_preview(words: str, max_len: int = 48) -> str:
+    text = " ".join(str(words).split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _format_timestamp(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes:02d}:{secs:06.3f}"
+
+
+def normalize_nsv_content(content: str) -> str:
+    text = content.strip()
+    text = re.sub(r"\s*-\s*", "-", text)
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"-+", "-", text)
+    return text.lower()
+
+
+def is_numeric_word(token: str) -> bool:
+    """True when the token is digits-only (e.g. ``191``), not ``3D``."""
+    core = _WORD_EDGE_PUNCT_RE.sub("", token)
+    if not core:
+        return False
+    return NUMERIC_WORD_RE.fullmatch(core) is not None
+
+
+def find_numeric_tokens(words: str) -> list[str]:
+    """Return distinct digit-only words found in a segment transcript."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in words.split():
+        if not raw:
+            continue
+        core = _WORD_EDGE_PUNCT_RE.sub("", raw)
+        if is_numeric_word(raw) and core not in seen:
+            seen.add(core)
+            found.append(core)
+    return found
+
+
+def _looks_like_token_body(text: str) -> bool:
+    return bool(_TOKEN_BODY_RE.fullmatch(text.strip()))
+
+
+def iter_nsv_candidates(words: str) -> Iterator[tuple[str, str]]:
+    """Yield ``(raw_span, inner_content)`` for NSV-like bracket tokens."""
+    i = 0
+    length = len(words)
+
+    while i < length:
+        ch = words[i]
+        if ch == "[":
+            close = words.find("]", i + 1)
+            if close != -1:
+                inner = words[i + 1 : close]
+                yield words[i : close + 1], inner
+                i = close + 1
+                continue
+
+            j = i + 1
+            while j < length and words[j] not in " \t":
+                j += 1
+            inner = words[i + 1 : j]
+            if inner.strip() and _looks_like_token_body(inner):
+                yield words[i:j], inner
+            i = max(j, i + 1)
+            continue
+
+        if ch.isascii() and ch.isalpha():
+            close = words.find("]", i + 1)
+            if close == -1:
+                i += 1
+                continue
+            inner = words[i:close]
+            if _looks_like_token_body(inner):
+                yield words[i : close + 1], inner
+                i = close + 1
+                continue
+
+        i += 1
+
+
+def find_unknown_nsv_tokens(words: str) -> list[str]:
+    """Return distinct unknown NSV spans in a segment transcript."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw_span, inner in iter_nsv_candidates(words):
+        normalized = normalize_nsv_content(inner)
+        if not normalized:
+            continue
+        if normalized in ALLOWED_NSVS:
+            continue
+        key = raw_span.lower()
+        if key not in seen:
+            seen.add(key)
+            found.append(raw_span)
+    return found
+
+
+def _bracket_spans(words: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for raw_span, _ in iter_nsv_candidates(words):
+        idx = words.find(raw_span)
+        if idx != -1:
+            spans.append((idx, idx + len(raw_span)))
+    return spans
+
+
+def _is_inside_bracket_span(words: str, start: int, end: int) -> bool:
+    for span_start, span_end in _bracket_spans(words):
+        if start >= span_start and end <= span_end:
+            return True
+    return False
+
+
+def _valid_ip_address(text: str) -> bool:
+    parts = text.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part.isdigit():
+            return False
+        value = int(part)
+        if value < 0 or value > 255:
+            return False
+    return True
+
+
+def _is_common_slash_phrase(text: str) -> bool:
+    if text.count("/") != 1:
+        return False
+    left, right = text.split("/", 1)
+    common = {
+        "and",
+        "or",
+        "he",
+        "she",
+        "his",
+        "her",
+        "yes",
+        "no",
+        "pro",
+        "con",
+    }
+    return left.lower() in common and right.lower() in common
+
+
+def _merge_non_overlapping_spans(
+    spans: list[tuple[int, int, str]],
+) -> list[str]:
+    ordered = sorted(spans, key=lambda item: (-(item[1] - item[0]), item[0]))
+    selected: list[tuple[int, int, str]] = []
+    for start, end, text in ordered:
+        if any(not (end <= sel_start or start >= sel_end) for sel_start, sel_end, _ in selected):
+            continue
+        selected.append((start, end, text))
+    return [text for _, _, text in sorted(selected, key=lambda item: item[0])]
+
+
+def find_compact_symbol_spans(words: str) -> list[str]:
+    """Return compact URL/email/path-style spans that should be spoken-form."""
+    matches: list[tuple[int, int, str]] = []
+
+    for label, pattern in _COMPACT_SYMBOL_PATTERNS:
+        for match in pattern.finditer(words):
+            start, end = match.span()
+            text = match.group()
+            if _is_inside_bracket_span(words, start, end):
+                continue
+            if label == "ip" and not _valid_ip_address(text):
+                continue
+            if label in {"file_path", "domain_path"} and _is_common_slash_phrase(text):
+                continue
+            if label == "handle" and "@" in text[1:] and "." in text:
+                continue
+            matches.append((start, end, text))
+
+    return _merge_non_overlapping_spans(matches)
+
+
+def load_seglst(path: Path) -> list[dict[str, Any]]:
+    with path.open(encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: expected JSON array")
+    return sorted(data, key=lambda item: _parse_time(item["start_time"]))
+
+
+def discover_seglst_files(task_dir: Path, variant: str) -> list[tuple[str, Path]]:
+    suffix = _seglst_suffix(variant)
+    pair_re = _pair_regex(variant)
+    pairs: list[tuple[str, Path]] = []
+    for seglst_path in sorted(task_dir.glob(f"*{suffix}")):
+        match = pair_re.match(seglst_path.name)
+        if match:
+            pairs.append((match.group(1), seglst_path))
+    return pairs
+
+
+def analyze_speaker_transcription(
+    speaker_id: str,
+    seglst_path: Path,
+    language: str | None,
+) -> SpeakerTranscriptionReport:
+    report = SpeakerTranscriptionReport(
+        speaker_id=speaker_id,
+        seglst_path=seglst_path,
+    )
+    for idx, segment in enumerate(load_seglst(seglst_path)):
+        words = str(segment.get("words", ""))
+        start = _parse_time(segment["start_time"])
+        end = _parse_time(segment["end_time"])
+        for numeric in find_numeric_tokens(words):
+            report.numeric_findings.append(
+                NumericFinding(
+                    segment_index=idx,
+                    start=start,
+                    end=end,
+                    detected=numeric,
+                    words_preview=_format_words_with_highlight(words, numeric),
+                )
+            )
+
+        for unknown in find_unknown_nsv_tokens(words):
+            report.unknown_nsv_findings.append(
+                UnknownNsvFinding(
+                    segment_index=idx,
+                    start=start,
+                    end=end,
+                    detected=unknown,
+                    words_preview=_format_words_with_highlight(words, unknown),
+                )
+            )
+
+        for symbol in find_compact_symbol_spans(words):
+            report.symbol_findings.append(
+                SymbolFinding(
+                    segment_index=idx,
+                    start=start,
+                    end=end,
+                    detected=symbol,
+                    words_preview=_format_words_with_highlight(words, symbol),
+                )
+            )
+
+        for detected, canonical in find_noncanonical_fillers(
+            words,
+            language,
+            is_inside_bracket_span=lambda s, e, w=words: _is_inside_bracket_span(w, s, e),
+        ):
+            report.filler_findings.append(
+                FillerFinding(
+                    segment_index=idx,
+                    start=start,
+                    end=end,
+                    detected=detected,
+                    canonical=canonical,
+                    words_preview=_format_words_with_highlight(words, detected),
+                )
+            )
+
+    return report
+
+
+def analyze_task_transcription(task_dir: Path, variant: str) -> TaskTranscriptionReport | None:
+    pairs = discover_seglst_files(task_dir, variant)
+    if not pairs:
+        return None
+
+    language = language_from_task_id(task_dir.name)
+    task = TaskTranscriptionReport(task_id=task_dir.name)
+    for speaker_id, seglst_path in pairs:
+        task.speakers.append(
+            analyze_speaker_transcription(speaker_id, seglst_path, language)
+        )
+    return task
+
+
+def _render_numbers_table(report: TaskTranscriptionReport) -> list[str]:
+    lines = [
+        "## Numbers",
+        "",
+        "| Speaker | # | start | end | detected | words | recommendation |",
+        "|---------|--:|------:|----:|----------|-------|----------------|",
+    ]
+    rows = 0
+    for speaker in report.speakers:
+        for finding in speaker.numeric_findings:
+            lines.append(
+                f"| {speaker.speaker_id} | {finding.segment_index} | "
+                f"{_format_timestamp(finding.start)} | {_format_timestamp(finding.end)} | "
+                f"`{finding.detected}` | {finding.words_preview} | "
+                f"{NUMBERS_RECOMMENDATION} |"
+            )
+            rows += 1
+    if rows == 0:
+        return ["## Numbers", "", "*No numeric words detected.*", ""]
+    lines.append("")
+    return lines
+
+
+def _render_unknown_nsv_table(report: TaskTranscriptionReport) -> list[str]:
+    lines = [
+        "## Unknown NSV",
+        "",
+        "| Speaker | # | start | end | detected | words | recommendation |",
+        "|---------|--:|------:|----:|----------|-------|----------------|",
+    ]
+    rows = 0
+    for speaker in report.speakers:
+        for finding in speaker.unknown_nsv_findings:
+            detected = finding.detected.replace("|", "\\|")
+            lines.append(
+                f"| {speaker.speaker_id} | {finding.segment_index} | "
+                f"{_format_timestamp(finding.start)} | {_format_timestamp(finding.end)} | "
+                f"`{detected}` | {finding.words_preview} | "
+                f"{UNKNOWN_NSV_RECOMMENDATION} |"
+            )
+            rows += 1
+    if rows == 0:
+        return ["## Unknown NSV", "", "*No unknown NSV tokens detected.*", ""]
+    lines.append("")
+    return lines
+
+
+def _render_symbols_table(report: TaskTranscriptionReport) -> list[str]:
+    lines = [
+        "## Compact symbols",
+        "",
+        "| Speaker | # | start | end | detected | words | recommendation |",
+        "|---------|--:|------:|----:|----------|-------|----------------|",
+    ]
+    rows = 0
+    for speaker in report.speakers:
+        for finding in speaker.symbol_findings:
+            detected = finding.detected.replace("|", "\\|").replace("`", "")
+            lines.append(
+                f"| {speaker.speaker_id} | {finding.segment_index} | "
+                f"{_format_timestamp(finding.start)} | {_format_timestamp(finding.end)} | "
+                f"`{detected}` | {finding.words_preview} | "
+                f"{SYMBOLS_RECOMMENDATION} |"
+            )
+            rows += 1
+    if rows == 0:
+        return ["## Compact symbols", "", "*No compact symbol forms detected.*", ""]
+    lines.append("")
+    return lines
+
+
+def _render_fillers_table(report: TaskTranscriptionReport) -> list[str]:
+    lines = [
+        "## Non-canonical Fillers",
+        "",
+        "| Speaker | # | start | end | detected | canonical | words | recommendation |",
+        "|---------|--:|------:|----:|----------|-----------|-------|----------------|",
+    ]
+    rows = 0
+    for speaker in report.speakers:
+        for finding in speaker.filler_findings:
+            detected = finding.detected.replace("|", "\\|").replace("`", "")
+            canonical = finding.canonical.replace("|", "\\|").replace("`", "")
+            lines.append(
+                f"| {speaker.speaker_id} | {finding.segment_index} | "
+                f"{_format_timestamp(finding.start)} | {_format_timestamp(finding.end)} | "
+                f"`{detected}` | `{canonical}` | {finding.words_preview} | "
+                f"{filler_recommendation(finding.canonical)} |"
+            )
+            rows += 1
+    if rows == 0:
+        return ["## Non-canonical Fillers", "", "*No non-canonical fillers detected.*", ""]
+    lines.append("")
+    return lines
+
+
+def render_transcription_words_report(report: TaskTranscriptionReport) -> list[str]:
+    """Return markdown lines for the Transcription Words Report section."""
+    lines = [
+        "# Transcription Words Report",
+        "",
+        f"- Numeric words: **{report.numeric_count}** | "
+        f"Unknown NSV tokens: **{report.unknown_nsv_count}** | "
+        f"Compact symbols: **{report.symbol_count}** | "
+        f"Non-canonical Fillers: **{report.filler_count}**",
+        "",
+    ]
+    lines.extend(_render_numbers_table(report))
+    lines.extend(_render_unknown_nsv_table(report))
+    lines.extend(_render_symbols_table(report))
+    lines.extend(_render_fillers_table(report))
+    return lines

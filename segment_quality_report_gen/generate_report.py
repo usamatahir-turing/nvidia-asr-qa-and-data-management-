@@ -43,6 +43,12 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
+from transcription_ar_checks import (
+    TaskTranscriptionReport,
+    analyze_task_transcription,
+    render_transcription_words_report,
+)
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -822,6 +828,7 @@ def render_task_report(
     max_silence_s: float,
     min_missed_s: float,
     ignore_edges: bool,
+    transcription: TaskTranscriptionReport | None = None,
 ) -> str:
     lines = [
         f"# Segmentation quality report — {task.task_id}",
@@ -864,32 +871,35 @@ def render_task_report(
     lines.append("")
 
     if task.passed:
-        lines.append("No issues found.")
+        lines.append("No segmentation issues found.")
         lines.append("")
-        return "\n".join(lines)
+    else:
+        lines.append("## Details")
+        lines.append("")
+        for spk in task.speakers:
+            lines.extend(
+                render_speaker_section(spk, tolerance_s, max_silence_s, min_missed_s)
+            )
 
-    lines.append("## Details")
-    lines.append("")
-    for spk in task.speakers:
-        lines.extend(
-            render_speaker_section(spk, tolerance_s, max_silence_s, min_missed_s)
+        lines.append("---")
+        lines.append("")
+        lines.append(
+            "*Boundary: onset err = annotated_start − signal_onset "
+            "(negative = annotation starts **early**); same convention for offset.*  "
         )
+        lines.append(
+            "*Silence: each gap is a continuous low-energy stretch **inside** the segment; "
+            "split the segment in Gecko at the gap.*  "
+        )
+        lines.append(
+            "*Uncovered audio: a stretch of energy that no segment covers; "
+            "add a new segment in Gecko (or extend a neighbour).*"
+        )
+        lines.append("")
 
-    lines.append("---")
-    lines.append("")
-    lines.append(
-        "*Boundary: onset err = annotated_start − signal_onset "
-        "(negative = annotation starts **early**); same convention for offset.*  "
-    )
-    lines.append(
-        "*Silence: each gap is a continuous low-energy stretch **inside** the segment; "
-        "split the segment in Gecko at the gap.*  "
-    )
-    lines.append(
-        "*Uncovered audio: a stretch of energy that no segment covers; "
-        "add a new segment in Gecko (or extend a neighbour).*"
-    )
-    lines.append("")
+    if transcription is not None:
+        lines.extend(render_transcription_words_report(transcription))
+
     return "\n".join(lines)
 
 
@@ -1071,6 +1081,7 @@ def main() -> None:
         )
         if report is None:
             continue
+        transcription = analyze_task_transcription(task_dir, variant)
         task_reports.append(report)
         out_path = output_root / f"{report.task_id}_{variant}.md"
         out_path.write_text(
@@ -1080,14 +1091,21 @@ def main() -> None:
                 args.max_silence,
                 args.min_missed,
                 ignore_edges,
+                transcription,
             ),
             encoding="utf-8",
         )
+        numeric_count = transcription.numeric_count if transcription else 0
+        unknown_nsv_count = transcription.unknown_nsv_count if transcription else 0
+        symbol_count = transcription.symbol_count if transcription else 0
+        filler_count = transcription.filler_count if transcription else 0
         print(
             f"  -> {out_path.name}: "
             f"{report.boundary_count} boundary / {report.silence_count} silence / "
             f"{report.uncovered_count} uncovered / {report.no_signal_count} no-signal "
-            f"failure(s) / {report.segment_count} segments",
+            f"failure(s) / {report.segment_count} segments / "
+            f"{numeric_count} numeric / {unknown_nsv_count} unknown NSV / "
+            f"{symbol_count} compact symbols / {filler_count} fillers",
             flush=True,
         )
 
