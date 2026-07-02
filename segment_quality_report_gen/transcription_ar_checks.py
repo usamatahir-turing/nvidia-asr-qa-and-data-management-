@@ -72,9 +72,10 @@ SPOKEN_FORM_RECOMMENDATION = "Listen to the audio and change to the spoken-form"
 STUTTER_RECOMMENDATION = "Add space if stutter"
 
 _DOT_ACRONYM_RE = re.compile(r"^[A-Za-z](?:\.[A-Za-z])+\.?$")
-_HYPHEN_ACRONYM_RE = re.compile(r"^(?:[A-Za-z]-){1,}[A-Za-z]$")
 _ORDINAL_RE = re.compile(r"^\d+(?:st|nd|rd|th)$", re.IGNORECASE)
-_ALPHANUMERIC_COMPACT_RE = re.compile(r"^(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9]+$")
+_DIGIT_THEN_LETTERS_RE = re.compile(r"^\d+[A-Za-z]+$")
+_LETTERS_THEN_DIGIT_RE = re.compile(r"^[A-Za-z]{2,}\d+$")
+_LETTER_DIGIT_LETTER_RE = re.compile(r"^[A-Za-z]\d+[A-Za-z]$")
 _PRO_SPAN_RE = re.compile(r"\{PRO:\s*[^}]+\}")
 
 
@@ -446,51 +447,23 @@ def _stutter_hyphen_spaced_form(token: str, *, raw: str | None = None) -> str | 
     return spaced
 
 
-def _canonical_acronym(token: str) -> str:
-    return re.sub(r"[.\-\s]", "", token).upper()
+def _canonical_dot_acronym(token: str) -> str:
+    return token.replace(".", "").upper()
 
 
 def _is_dot_acronym(token: str) -> bool:
     if not _DOT_ACRONYM_RE.fullmatch(token):
         return False
-    return len(_canonical_acronym(token)) >= 2
+    return len(_canonical_dot_acronym(token)) >= 2
 
 
-def _is_single_uppercase_letter(token_core: str, raw: str) -> bool:
-    if (
-        len(token_core) != 1
-        or not token_core.isascii()
-        or not token_core.isalpha()
-        or not token_core.isupper()
-    ):
-        return False
-    return "-" not in raw
-
-
-def _find_spaced_letter_acronym_spans(words: str) -> list[tuple[int, int, str, str]]:
-    """Find ``F B I``-style runs of standalone uppercase single-letter tokens."""
-    tokens: list[tuple[int, int, str, str]] = []
-    for match in re.finditer(r"\S+", words):
-        raw = match.group()
-        core = _WORD_EDGE_PUNCT_RE.sub("", raw)
-        tokens.append((match.start(), match.end(), raw, core))
-
-    spans: list[tuple[int, int, str, str]] = []
-    index = 0
-    while index < len(tokens):
-        run_start = index
-        while index < len(tokens) and _is_single_uppercase_letter(tokens[index][3], tokens[index][2]):
-            index += 1
-        run_len = index - run_start
-        if run_len >= 2:
-            span_start = tokens[run_start][0]
-            span_end = tokens[index - 1][1]
-            detected = words[span_start:span_end]
-            canonical = "".join(tokens[pos][3] for pos in range(run_start, index))
-            spans.append((span_start, span_end, detected, canonical))
-        else:
-            index = run_start + 1
-    return spans
+def _is_alphanumeric_compact(token: str) -> bool:
+    """Compact digit/letter forms like ``5G``, ``3D``, ``H2O`` — not ``s0``."""
+    return bool(
+        _DIGIT_THEN_LETTERS_RE.fullmatch(token)
+        or _LETTERS_THEN_DIGIT_RE.fullmatch(token)
+        or _LETTER_DIGIT_LETTER_RE.fullmatch(token)
+    )
 
 
 def _overlaps_compact_symbol_span(words: str, start: int, end: int) -> bool:
@@ -520,7 +493,7 @@ def find_noncanonical_abbreviations(
 ) -> list[tuple[str, str | None, bool]]:
     """Return ``(detected, canonical, is_stutter)`` abbreviation / compact-form issues.
 
-    * ``canonical`` set — non-canonical acronym spelling (``F.B.I.`` → ``FBI``).
+    * ``canonical`` set — non-canonical dot acronym spelling (``F.B.I.`` → ``FBI``).
     * ``canonical`` set, ``is_stutter`` — hyphen stutter (``I-I-`` → ``I- I-``).
     * ``canonical`` None — alphanumeric compact (``5G``) or ordinal (``1st``).
     """
@@ -546,9 +519,6 @@ def find_noncanonical_abbreviations(
         seen_spans.add((start, end))
         findings.append((detected, canonical, is_stutter))
 
-    for span_start, span_end, detected, canonical in _find_spaced_letter_acronym_spans(words):
-        add_finding(span_start, span_end, detected, canonical)
-
     for match in re.finditer(r"\S+", words):
         raw = match.group()
         start, end = match.span()
@@ -564,11 +534,11 @@ def find_noncanonical_abbreviations(
             continue
 
         canonical: str | None = None
-        if _is_dot_acronym(core) or _is_letter_hyphen_acronym(core):
-            canonical = _canonical_acronym(core)
+        if _is_dot_acronym(core):
+            canonical = _canonical_dot_acronym(core)
         elif _ORDINAL_RE.fullmatch(core):
             canonical = None
-        elif _ALPHANUMERIC_COMPACT_RE.fullmatch(core):
+        elif _is_alphanumeric_compact(core):
             canonical = None
         else:
             continue
