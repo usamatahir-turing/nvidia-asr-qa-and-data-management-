@@ -69,6 +69,7 @@ UNKNOWN_NSV_RECOMMENDATION = (
 )
 SYMBOLS_RECOMMENDATION = "Listen to the audio to ensure it's written in spoken form"
 SPOKEN_FORM_RECOMMENDATION = "Listen to the audio and change to the spoken-form"
+STUTTER_RECOMMENDATION = "Add space if stutter"
 
 _DOT_ACRONYM_RE = re.compile(r"^[A-Za-z](?:\.[A-Za-z])+\.?$")
 _HYPHEN_ACRONYM_RE = re.compile(r"^(?:[A-Za-z]-){1,}[A-Za-z]$")
@@ -81,7 +82,9 @@ def filler_recommendation(canonical: str) -> str:
     return f"Use canonical filler form: {canonical}"
 
 
-def abbreviation_recommendation(canonical: str | None) -> str:
+def abbreviation_recommendation(canonical: str | None, *, is_stutter: bool = False) -> str:
+    if is_stutter:
+        return STUTTER_RECOMMENDATION
     if canonical:
         return f"Use canonical acronym form: {canonical}"
     return SPOKEN_FORM_RECOMMENDATION
@@ -161,6 +164,7 @@ class AbbreviationFinding:
     detected: str
     canonical: str | None
     words_preview: str
+    is_stutter: bool = False
 
 
 @dataclass
@@ -420,8 +424,26 @@ def _is_inside_pro_span(words: str, start: int, end: int) -> bool:
 
 
 def _is_letter_hyphen_acronym(text: str) -> bool:
-    parts = text.split("-")
+    if _stutter_hyphen_spaced_form(text) is not None:
+        return False
+    parts = [part for part in text.split("-") if part]
     return len(parts) >= 2 and all(len(part) == 1 and part.isalpha() for part in parts)
+
+
+def _stutter_hyphen_spaced_form(token: str, *, raw: str | None = None) -> str | None:
+    """Return spaced stutter form (``I-I-`` → ``I- I-``) when letters repeat."""
+    parts = [part for part in token.split("-") if part]
+    if len(parts) < 2:
+        return None
+    if not all(len(part) == 1 and part.isalpha() for part in parts):
+        return None
+    if len({part.lower() for part in parts}) != 1:
+        return None
+    spaced = "- ".join(parts[:-1]) + f"- {parts[-1]}"
+    source = raw if raw is not None else token
+    if source.endswith("-"):
+        spaced += "-"
+    return spaced
 
 
 def _canonical_acronym(token: str) -> str:
@@ -434,13 +456,15 @@ def _is_dot_acronym(token: str) -> bool:
     return len(_canonical_acronym(token)) >= 2
 
 
-def _is_single_uppercase_letter(token_core: str) -> bool:
-    return (
-        len(token_core) == 1
-        and token_core.isascii()
-        and token_core.isalpha()
-        and token_core.isupper()
-    )
+def _is_single_uppercase_letter(token_core: str, raw: str) -> bool:
+    if (
+        len(token_core) != 1
+        or not token_core.isascii()
+        or not token_core.isalpha()
+        or not token_core.isupper()
+    ):
+        return False
+    return "-" not in raw
 
 
 def _find_spaced_letter_acronym_spans(words: str) -> list[tuple[int, int, str, str]]:
@@ -455,7 +479,7 @@ def _find_spaced_letter_acronym_spans(words: str) -> list[tuple[int, int, str, s
     index = 0
     while index < len(tokens):
         run_start = index
-        while index < len(tokens) and _is_single_uppercase_letter(tokens[index][3]):
+        while index < len(tokens) and _is_single_uppercase_letter(tokens[index][3], tokens[index][2]):
             index += 1
         run_len = index - run_start
         if run_len >= 2:
@@ -474,7 +498,9 @@ def _overlaps_compact_symbol_span(words: str, start: int, end: int) -> bool:
         for match in pattern.finditer(words):
             span_start, span_end = match.span()
             text = match.group()
-            if label == "slug" and _is_letter_hyphen_acronym(text):
+            if label == "slug" and (
+                _is_letter_hyphen_acronym(text) or _stutter_hyphen_spaced_form(text)
+            ):
                 continue
             if _is_inside_bracket_span(words, span_start, span_end):
                 continue
@@ -489,16 +515,26 @@ def _overlaps_compact_symbol_span(words: str, start: int, end: int) -> bool:
     return False
 
 
-def find_noncanonical_abbreviations(words: str) -> list[tuple[str, str | None]]:
-    """Return ``(detected, canonical)`` pairs for abbreviation / compact-form issues.
+def find_noncanonical_abbreviations(
+    words: str,
+) -> list[tuple[str, str | None, bool]]:
+    """Return ``(detected, canonical, is_stutter)`` abbreviation / compact-form issues.
 
     * ``canonical`` set — non-canonical acronym spelling (``F.B.I.`` → ``FBI``).
+    * ``canonical`` set, ``is_stutter`` — hyphen stutter (``I-I-`` → ``I- I-``).
     * ``canonical`` None — alphanumeric compact (``5G``) or ordinal (``1st``).
     """
-    findings: list[tuple[str, str | None]] = []
+    findings: list[tuple[str, str | None, bool]] = []
     seen_spans: set[tuple[int, int]] = set()
 
-    def add_finding(start: int, end: int, detected: str, canonical: str | None) -> None:
+    def add_finding(
+        start: int,
+        end: int,
+        detected: str,
+        canonical: str | None,
+        *,
+        is_stutter: bool = False,
+    ) -> None:
         if (start, end) in seen_spans:
             return
         if _is_inside_bracket_span(words, start, end):
@@ -508,7 +544,7 @@ def find_noncanonical_abbreviations(words: str) -> list[tuple[str, str | None]]:
         if _overlaps_compact_symbol_span(words, start, end):
             return
         seen_spans.add((start, end))
-        findings.append((detected, canonical))
+        findings.append((detected, canonical, is_stutter))
 
     for span_start, span_end, detected, canonical in _find_spaced_letter_acronym_spans(words):
         add_finding(span_start, span_end, detected, canonical)
@@ -520,6 +556,11 @@ def find_noncanonical_abbreviations(words: str) -> list[tuple[str, str | None]]:
             continue
         core = _WORD_EDGE_PUNCT_RE.sub("", raw)
         if not core:
+            continue
+
+        stutter_form = _stutter_hyphen_spaced_form(core, raw=raw)
+        if stutter_form is not None:
+            add_finding(start, end, raw, stutter_form, is_stutter=True)
             continue
 
         canonical: str | None = None
@@ -597,7 +638,9 @@ def find_compact_symbol_spans(words: str) -> list[str]:
                 continue
             if label == "handle" and "@" in text[1:] and "." in text:
                 continue
-            if label == "slug" and _is_letter_hyphen_acronym(text):
+            if label == "slug" and (
+                _is_letter_hyphen_acronym(text) or _stutter_hyphen_spaced_form(text)
+            ):
                 continue
             matches.append((start, end, text))
 
@@ -685,7 +728,7 @@ def analyze_speaker_transcription(
                 )
             )
 
-        for detected, canonical in find_noncanonical_abbreviations(words):
+        for detected, canonical, is_stutter in find_noncanonical_abbreviations(words):
             report.abbreviation_findings.append(
                 AbbreviationFinding(
                     segment_index=idx,
@@ -694,6 +737,7 @@ def analyze_speaker_transcription(
                     detected=detected,
                     canonical=canonical,
                     words_preview=_format_words_with_highlight(words, detected),
+                    is_stutter=is_stutter,
                 )
             )
 
@@ -837,7 +881,7 @@ def _render_abbreviations_table(report: TaskTranscriptionReport) -> list[str]:
                 f"| {speaker.speaker_id} | {finding.segment_index} | "
                 f"{_format_timestamp(finding.start)} | {_format_timestamp(finding.end)} | "
                 f"`{detected}` | `{canonical}` | {finding.words_preview} | "
-                f"{abbreviation_recommendation(finding.canonical)} |"
+                f"{abbreviation_recommendation(finding.canonical, is_stutter=finding.is_stutter)} |"
             )
             rows += 1
     if rows == 0:
