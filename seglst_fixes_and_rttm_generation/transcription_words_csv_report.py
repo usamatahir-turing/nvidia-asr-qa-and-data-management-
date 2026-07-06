@@ -4,6 +4,8 @@
 Runs the same checks as ``generate_report_v2.py`` (via ``transcription_ar_checks``)
 on ``*_approved.seglst.json`` files under ``output_data`` (after ``fix_seglst_tokens.py``).
 
+Also scans segment text for likely mojibake / encoding corruption (CSV only).
+
 Default layout::
 
     output_data/
@@ -40,6 +42,7 @@ from transcription_ar_checks import (  # noqa: E402
     analyze_task_transcription_pairs,
     discover_seglst_files,
     filler_recommendation,
+    load_seglst,
 )
 
 SEGLST_GLOB = "*_approved.seglst.json"
@@ -66,6 +69,20 @@ CATEGORY_UNKNOWN_NSV = "Unknown NSV"
 CATEGORY_SYMBOLS = "Compact symbols"
 CATEGORY_FILLERS = "Non-canonical Fillers"
 CATEGORY_ACRONYMS = "Acronyms and Stutters"
+CATEGORY_MOJIBAKE = "Encoding / Mojibake"
+
+MOJIBAKE_RECOMMENDATION = (
+    "Possible encoding corruption (mojibake). Restore correct Unicode spelling."
+)
+
+# High-signal fragments from UTF-8 text misread as Latin-1 / Windows-1252.
+_MOJIBAKE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"â€[™œž—\"']"),
+    re.compile(r"ï¿½"),
+    re.compile(r"Ã[\x80-\xBF]"),
+    re.compile(r"Â[«»·]"),
+    re.compile(r"\uFFFD"),
+)
 
 _MD_BOLD_RE = re.compile(r"\*\*")
 
@@ -78,6 +95,73 @@ def _format_timestamp(seconds: float) -> str:
 
 def _plain_words(text: str) -> str:
     return _MD_BOLD_RE.sub("", text).replace("|", "\\|")
+
+
+def _parse_segment_time(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return float(str(value).strip())
+
+
+def _words_preview(words: str, *, max_len: int = 72) -> str:
+    text = " ".join(str(words).split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def find_mojibake_spans(words: str) -> list[tuple[int, int, str]]:
+    """Return non-overlapping ``(start, end, matched_text)`` mojibake spans."""
+    matches: list[tuple[int, int, str]] = []
+    for pattern in _MOJIBAKE_PATTERNS:
+        for match in pattern.finditer(words):
+            matches.append((match.start(), match.end(), match.group()))
+
+    if not matches:
+        return []
+
+    ordered = sorted(matches, key=lambda item: (item[0], -(item[1] - item[0])))
+    selected: list[tuple[int, int, str]] = []
+    for start, end, text in ordered:
+        if any(not (end <= sel_start or start >= sel_end) for sel_start, sel_end, _ in selected):
+            continue
+        selected.append((start, end, text))
+
+    return sorted(selected, key=lambda item: item[0])
+
+
+def rows_from_mojibake_scan(
+    conversation: str,
+    speaker: str,
+    seglst_path: Path,
+) -> list[CsvRow]:
+    rows: list[CsvRow] = []
+    for idx, segment in enumerate(load_seglst(seglst_path)):
+        words = str(segment.get("words", ""))
+        if not words.strip():
+            continue
+
+        start = _parse_segment_time(segment["start_time"])
+        end = _parse_segment_time(segment["end_time"])
+        preview = _words_preview(words)
+
+        for _span_start, _span_end, detected in find_mojibake_spans(words):
+            rows.append(
+                CsvRow(
+                    conversation=conversation,
+                    speaker=speaker,
+                    category=CATEGORY_MOJIBAKE,
+                    segment_index=idx,
+                    start=_format_timestamp(start),
+                    end=_format_timestamp(end),
+                    detected=detected,
+                    canonical="",
+                    words=preview,
+                    recommendation=MOJIBAKE_RECOMMENDATION,
+                )
+            )
+
+    return rows
 
 
 @dataclass
@@ -358,13 +442,19 @@ def main() -> int:
         conversations_processed += 1
         speakers_processed += len(report.speakers)
         all_rows.extend(rows_from_report(report))
+        mojibake_count = 0
+        for speaker_id, seglst_path in pairs:
+            mojibake_rows = rows_from_mojibake_scan(task_dir.name, speaker_id, seglst_path)
+            mojibake_count += len(mojibake_rows)
+            all_rows.extend(mojibake_rows)
         print(
             f"  {task_dir.name}: "
             f"{report.numeric_count} numeric / "
             f"{report.unknown_nsv_count} unknown NSV / "
             f"{report.symbol_count} compact symbols / "
             f"{report.filler_count} fillers / "
-            f"{report.abbreviation_count} acronyms/stutters",
+            f"{report.abbreviation_count} acronyms/stutters / "
+            f"{mojibake_count} mojibake",
             flush=True,
         )
 
@@ -376,6 +466,7 @@ def main() -> int:
         CATEGORY_SYMBOLS: sum(1 for r in all_rows if r.category == CATEGORY_SYMBOLS),
         CATEGORY_FILLERS: sum(1 for r in all_rows if r.category == CATEGORY_FILLERS),
         CATEGORY_ACRONYMS: sum(1 for r in all_rows if r.category == CATEGORY_ACRONYMS),
+        CATEGORY_MOJIBAKE: sum(1 for r in all_rows if r.category == CATEGORY_MOJIBAKE),
     }
 
     print()
@@ -396,6 +487,7 @@ def main() -> int:
     print(f"    Compact symbols: {category_counts[CATEGORY_SYMBOLS]}")
     print(f"    Non-canonical Fillers: {category_counts[CATEGORY_FILLERS]}")
     print(f"    Acronyms and Stutters: {category_counts[CATEGORY_ACRONYMS]}")
+    print(f"    Encoding / Mojibake: {category_counts[CATEGORY_MOJIBAKE]}")
     print(f"  CSV: {output_path}")
 
     return 0
