@@ -431,6 +431,22 @@ def _is_letter_hyphen_acronym(text: str) -> bool:
     return len(parts) >= 2 and all(len(part) == 1 and part.isalpha() for part in parts)
 
 
+def _is_natural_language_hyphen_compound(text: str) -> bool:
+    """True for spoken compounds like ``peer-to-peer``, not technical slugs."""
+    parts = [part for part in text.split("-") if part]
+    if len(parts) < 3:
+        return False
+    return all(part.isalpha() and len(part) >= 2 for part in parts)
+
+
+def _skip_slug_compact_symbol(text: str) -> bool:
+    return (
+        _is_letter_hyphen_acronym(text)
+        or _stutter_hyphen_spaced_form(text) is not None
+        or _is_natural_language_hyphen_compound(text)
+    )
+
+
 def _stutter_hyphen_spaced_form(token: str, *, raw: str | None = None) -> str | None:
     """Return spaced stutter form (``I-I-`` → ``I- I-``) for ASCII letter repeats."""
     parts = [part for part in token.split("-") if part]
@@ -473,9 +489,7 @@ def _overlaps_compact_symbol_span(words: str, start: int, end: int) -> bool:
         for match in pattern.finditer(words):
             span_start, span_end = match.span()
             text = match.group()
-            if label == "slug" and (
-                _is_letter_hyphen_acronym(text) or _stutter_hyphen_spaced_form(text)
-            ):
+            if label == "slug" and _skip_slug_compact_symbol(text):
                 continue
             if _is_inside_bracket_span(words, span_start, span_end):
                 continue
@@ -613,9 +627,7 @@ def find_compact_symbol_spans(words: str) -> list[str]:
                 continue
             if label == "handle" and "@" in text[1:] and "." in text:
                 continue
-            if label == "slug" and (
-                _is_letter_hyphen_acronym(text) or _stutter_hyphen_spaced_form(text)
-            ):
+            if label == "slug" and _skip_slug_compact_symbol(text):
                 continue
             matches.append((start, end, text))
 
