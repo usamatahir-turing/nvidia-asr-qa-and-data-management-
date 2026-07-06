@@ -23,7 +23,7 @@ Output tree (overwritten on each run)::
 
 Token fixes applied to each segment's ``words`` field:
 
-- Add missing opening bracket: ``inhale]`` -> ``[inhale]``
+- Add missing opening bracket: ``inhale]`` / ``inhale ]`` -> ``[inhale]``
 - Remove space after ``[``: ``[ exhale]`` -> ``[exhale]``
 - Hyphenate compounds: ``other- noise``, ``other - noise``, ``[other noise]`` -> ``[other-noise]``
 - Collapse repeated hyphens: ``clear--throat`` -> ``clear-throat``
@@ -169,8 +169,14 @@ def _shortest_repairable_nsv_suffix(token_run: str) -> str | None:
 
 
 def _repair_missing_open_bracket(words: str, start: int, close: int) -> tuple[str, int] | None:
-    """Repair ``inhale]`` / ``...speech inhale]`` without swallowing preceding speech."""
-    inner = words[start:close]
+    """Repair ``inhale]``, ``inhale ]``, or ``...speech inhale ]`` without swallowing speech."""
+    token_end = close
+    while token_end > start and words[token_end - 1].isspace():
+        token_end -= 1
+    if token_end <= start:
+        return None
+
+    inner = words[start:token_end]
     if not _TOKEN_BODY_RE.fullmatch(inner):
         return None
 
@@ -178,10 +184,10 @@ def _repair_missing_open_bracket(words: str, start: int, close: int) -> tuple[st
     if repair is None:
         return None
 
-    suffix_start = close - len(repair)
-    if words[suffix_start:close] != repair:
+    suffix_start = token_end - len(repair)
+    if words[suffix_start:token_end] != repair:
         return None
-    if "[" in words[suffix_start:close]:
+    if "[" in words[suffix_start:token_end]:
         return None
 
     prefix = words[start:suffix_start]
