@@ -4,8 +4,8 @@
 Runs the same checks as ``generate_report_v2.py`` (via ``transcription_ar_checks``)
 on ``*_approved.seglst.json`` files under ``output_data`` (after ``fix_seglst_tokens.py``).
 
-Also scans segment text for likely mojibake / encoding corruption and unbalanced
-``()``, ``[]``, or ``{}`` (CSV only).
+Also scans segment text for likely mojibake / encoding corruption, unbalanced
+``()``, ``[]``, or ``{}``, and negative segment duration (CSV only).
 
 Default layout::
 
@@ -72,12 +72,16 @@ CATEGORY_FILLERS = "Non-canonical Fillers"
 CATEGORY_ACRONYMS = "Acronyms and Stutters"
 CATEGORY_MOJIBAKE = "Encoding / Mojibake"
 CATEGORY_BRACKETS = "Bracket imbalance"
+CATEGORY_NEGATIVE_DURATION = "Negative duration"
 
 MOJIBAKE_RECOMMENDATION = (
     "Possible encoding corruption (mojibake). Restore correct Unicode spelling."
 )
 BRACKET_RECOMMENDATION = (
     "Brackets are unbalanced. Fix mismatched (), [], or {} in the segment."
+)
+NEGATIVE_DURATION_RECOMMENDATION = (
+    "Segment end_time is before start_time. Fix timestamps manually."
 )
 
 # (open, close, label) — checked only by ``find_bracket_issues``.
@@ -184,25 +188,53 @@ def find_bracket_issues(words: str) -> list[str]:
     return unique
 
 
+def negative_duration_issue(start: float, end: float) -> str | None:
+    """Return a description when *end* is before *start*."""
+    if end >= start:
+        return None
+    return (
+        f"end {end:.2f} before start {start:.2f} "
+        f"(duration {end - start:.2f}s)"
+    )
+
+
 def rows_from_segment_scans(
     conversation: str,
     speaker: str,
     seglst_path: Path,
-) -> tuple[list[CsvRow], list[CsvRow]]:
-    """Return (mojibake_rows, bracket_rows) from one seglst pass."""
+) -> tuple[list[CsvRow], list[CsvRow], list[CsvRow]]:
+    """Return (mojibake_rows, bracket_rows, negative_duration_rows) from one seglst pass."""
     mojibake_rows: list[CsvRow] = []
     bracket_rows: list[CsvRow] = []
+    duration_rows: list[CsvRow] = []
 
     for idx, segment in enumerate(load_seglst(seglst_path)):
         words = str(segment.get("words", ""))
-        if not words.strip():
-            continue
-
         start = _parse_segment_time(segment["start_time"])
         end = _parse_segment_time(segment["end_time"])
         preview = _words_preview(words)
         start_ts = _format_timestamp(start)
         end_ts = _format_timestamp(end)
+
+        duration_issue = negative_duration_issue(start, end)
+        if duration_issue is not None:
+            duration_rows.append(
+                CsvRow(
+                    conversation=conversation,
+                    speaker=speaker,
+                    category=CATEGORY_NEGATIVE_DURATION,
+                    segment_index=idx,
+                    start=start_ts,
+                    end=end_ts,
+                    detected=duration_issue,
+                    canonical="",
+                    words=preview,
+                    recommendation=NEGATIVE_DURATION_RECOMMENDATION,
+                )
+            )
+
+        if not words.strip():
+            continue
 
         for _span_start, _span_end, detected in find_mojibake_spans(words):
             mojibake_rows.append(
@@ -236,7 +268,7 @@ def rows_from_segment_scans(
                 )
             )
 
-    return mojibake_rows, bracket_rows
+    return mojibake_rows, bracket_rows, duration_rows
 
 
 @dataclass
@@ -519,14 +551,17 @@ def main() -> int:
         all_rows.extend(rows_from_report(report))
         mojibake_count = 0
         bracket_count = 0
+        negative_duration_count = 0
         for speaker_id, seglst_path in pairs:
-            mojibake_rows, bracket_rows = rows_from_segment_scans(
+            mojibake_rows, bracket_rows, duration_rows = rows_from_segment_scans(
                 task_dir.name, speaker_id, seglst_path
             )
             mojibake_count += len(mojibake_rows)
             bracket_count += len(bracket_rows)
+            negative_duration_count += len(duration_rows)
             all_rows.extend(mojibake_rows)
             all_rows.extend(bracket_rows)
+            all_rows.extend(duration_rows)
         print(
             f"  {task_dir.name}: "
             f"{report.numeric_count} numeric / "
@@ -535,7 +570,8 @@ def main() -> int:
             f"{report.filler_count} fillers / "
             f"{report.abbreviation_count} acronyms/stutters / "
             f"{mojibake_count} mojibake / "
-            f"{bracket_count} bracket imbalance",
+            f"{bracket_count} bracket imbalance / "
+            f"{negative_duration_count} negative duration",
             flush=True,
         )
 
@@ -549,6 +585,9 @@ def main() -> int:
         CATEGORY_ACRONYMS: sum(1 for r in all_rows if r.category == CATEGORY_ACRONYMS),
         CATEGORY_MOJIBAKE: sum(1 for r in all_rows if r.category == CATEGORY_MOJIBAKE),
         CATEGORY_BRACKETS: sum(1 for r in all_rows if r.category == CATEGORY_BRACKETS),
+        CATEGORY_NEGATIVE_DURATION: sum(
+            1 for r in all_rows if r.category == CATEGORY_NEGATIVE_DURATION
+        ),
     }
 
     print()
@@ -571,6 +610,7 @@ def main() -> int:
     print(f"    Acronyms and Stutters: {category_counts[CATEGORY_ACRONYMS]}")
     print(f"    Encoding / Mojibake: {category_counts[CATEGORY_MOJIBAKE]}")
     print(f"    Bracket imbalance: {category_counts[CATEGORY_BRACKETS]}")
+    print(f"    Negative duration: {category_counts[CATEGORY_NEGATIVE_DURATION]}")
     print(f"  CSV: {output_path}")
 
     return 0
