@@ -32,6 +32,7 @@ Token fixes applied to each segment's ``words`` field:
 - Remove empty brackets: ``[]``, ``()``, ``{}`` (optional whitespace inside) -> ````
 - Lowercase token text inside brackets
 - Correct common token misspellings (see ``TOKEN_SPELLING_FIXES``)
+- Rename deprecated NSV: ``[click]`` -> ``[other-noise]``
 
 Timing fixes applied per segment (sorted by ``start_time``):
 
@@ -108,7 +109,6 @@ ALLOWED_NSVS = frozenset(
         "hiccup",
         "unintelligible",
         "other-noise",
-        "click",
     }
 )
 
@@ -144,6 +144,8 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "nhale": "inhale",
     "inahel": "inhale",
     "inahle": "inhale",
+    # -> other-noise
+    "click": "other-noise",
 }
 
 

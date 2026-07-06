@@ -55,7 +55,6 @@ ALLOWED_NSVS = frozenset(
         "hiccup",
         "unintelligible",
         "other-noise",
-        "click"
     }
 )
 
