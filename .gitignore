@@ -2,6 +2,7 @@
 drive_downloads/
 drive_data/
 seglst_fixes_and_rttm_generation/output_data/
+seglst_fixes_and_rttm_generation/batch_conversations_list.txt
 segment_quality_report_gen/reports_approved/
 segment_quality_report_gen/reports_fixed/
 token_segment_density_check/fixed_tokens_output_folder/

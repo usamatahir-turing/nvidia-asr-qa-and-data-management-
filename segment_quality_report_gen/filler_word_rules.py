@@ -166,6 +166,15 @@ def _variant_lookup_for_lang(lang: str) -> dict[str, str]:
     return lookup
 
 
+def _phrase_boundary_pattern(variant_key: str) -> re.Pattern[str]:
+    """Match spaced filler variants only as standalone tokens, not across word edges."""
+    flags = re.IGNORECASE if variant_key.isascii() else 0
+    return re.compile(
+        r"(?<!\w)" + re.escape(variant_key) + r"(?!\w)",
+        flags,
+    )
+
+
 @lru_cache(maxsize=16)
 def _phrase_patterns_for_lang(lang: str) -> list[tuple[re.Pattern[str], str]]:
     patterns: list[tuple[re.Pattern[str], str]] = []
@@ -173,14 +182,7 @@ def _phrase_patterns_for_lang(lang: str) -> list[tuple[re.Pattern[str], str]]:
     for variant_key, canonical in sorted(lookup.items(), key=lambda item: -len(item[0])):
         if " " not in variant_key:
             continue
-        if variant_key.isascii():
-            pattern = re.compile(
-                r"(?<!\w)" + re.escape(variant_key) + r"(?!\w)",
-                re.IGNORECASE,
-            )
-        else:
-            pattern = re.compile(re.escape(variant_key))
-        patterns.append((pattern, canonical))
+        patterns.append((_phrase_boundary_pattern(variant_key), canonical))
     return patterns
 
 
