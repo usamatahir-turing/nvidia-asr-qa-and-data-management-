@@ -4,7 +4,8 @@
 Runs the same checks as ``generate_report_v2.py`` (via ``transcription_ar_checks``)
 on ``*_approved.seglst.json`` files under ``output_data`` (after ``fix_seglst_tokens.py``).
 
-Also scans segment text for likely mojibake / encoding corruption (CSV only).
+Also scans segment text for likely mojibake / encoding corruption and unbalanced
+NSV square brackets (CSV only).
 
 Default layout::
 
@@ -70,9 +71,13 @@ CATEGORY_SYMBOLS = "Compact symbols"
 CATEGORY_FILLERS = "Non-canonical Fillers"
 CATEGORY_ACRONYMS = "Acronyms and Stutters"
 CATEGORY_MOJIBAKE = "Encoding / Mojibake"
+CATEGORY_BRACKETS = "Bracket imbalance"
 
 MOJIBAKE_RECOMMENDATION = (
     "Possible encoding corruption (mojibake). Restore correct Unicode spelling."
+)
+BRACKET_RECOMMENDATION = (
+    "Square brackets are unbalanced. Add or remove '[' / ']' around NSV tokens."
 )
 
 # High-signal fragments from UTF-8 text misread as Latin-1 / Windows-1252.
@@ -130,12 +135,50 @@ def find_mojibake_spans(words: str) -> list[tuple[int, int, str]]:
     return sorted(selected, key=lambda item: item[0])
 
 
-def rows_from_mojibake_scan(
+def find_bracket_issues(words: str) -> list[str]:
+    """Return human-readable NSV square-bracket imbalance issues."""
+    if "[" not in words and "]" not in words:
+        return []
+
+    issues: list[str] = []
+    open_count = words.count("[")
+    close_count = words.count("]")
+    if open_count != close_count:
+        issues.append(f"{open_count} '[' vs {close_count} ']'")
+
+    depth = 0
+    for ch in words:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            if depth == 0:
+                issues.append("unmatched ']'")
+            else:
+                depth -= 1
+
+    if depth == 1:
+        issues.append("unclosed '['")
+    elif depth > 1:
+        issues.append(f"{depth} unclosed '['")
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for issue in issues:
+        if issue not in seen:
+            seen.add(issue)
+            unique.append(issue)
+    return unique
+
+
+def rows_from_segment_scans(
     conversation: str,
     speaker: str,
     seglst_path: Path,
-) -> list[CsvRow]:
-    rows: list[CsvRow] = []
+) -> tuple[list[CsvRow], list[CsvRow]]:
+    """Return (mojibake_rows, bracket_rows) from one seglst pass."""
+    mojibake_rows: list[CsvRow] = []
+    bracket_rows: list[CsvRow] = []
+
     for idx, segment in enumerate(load_seglst(seglst_path)):
         words = str(segment.get("words", ""))
         if not words.strip():
@@ -144,16 +187,18 @@ def rows_from_mojibake_scan(
         start = _parse_segment_time(segment["start_time"])
         end = _parse_segment_time(segment["end_time"])
         preview = _words_preview(words)
+        start_ts = _format_timestamp(start)
+        end_ts = _format_timestamp(end)
 
         for _span_start, _span_end, detected in find_mojibake_spans(words):
-            rows.append(
+            mojibake_rows.append(
                 CsvRow(
                     conversation=conversation,
                     speaker=speaker,
                     category=CATEGORY_MOJIBAKE,
                     segment_index=idx,
-                    start=_format_timestamp(start),
-                    end=_format_timestamp(end),
+                    start=start_ts,
+                    end=end_ts,
                     detected=detected,
                     canonical="",
                     words=preview,
@@ -161,7 +206,23 @@ def rows_from_mojibake_scan(
                 )
             )
 
-    return rows
+        for detected in find_bracket_issues(words):
+            bracket_rows.append(
+                CsvRow(
+                    conversation=conversation,
+                    speaker=speaker,
+                    category=CATEGORY_BRACKETS,
+                    segment_index=idx,
+                    start=start_ts,
+                    end=end_ts,
+                    detected=detected,
+                    canonical="",
+                    words=preview,
+                    recommendation=BRACKET_RECOMMENDATION,
+                )
+            )
+
+    return mojibake_rows, bracket_rows
 
 
 @dataclass
@@ -443,10 +504,15 @@ def main() -> int:
         speakers_processed += len(report.speakers)
         all_rows.extend(rows_from_report(report))
         mojibake_count = 0
+        bracket_count = 0
         for speaker_id, seglst_path in pairs:
-            mojibake_rows = rows_from_mojibake_scan(task_dir.name, speaker_id, seglst_path)
+            mojibake_rows, bracket_rows = rows_from_segment_scans(
+                task_dir.name, speaker_id, seglst_path
+            )
             mojibake_count += len(mojibake_rows)
+            bracket_count += len(bracket_rows)
             all_rows.extend(mojibake_rows)
+            all_rows.extend(bracket_rows)
         print(
             f"  {task_dir.name}: "
             f"{report.numeric_count} numeric / "
@@ -454,7 +520,8 @@ def main() -> int:
             f"{report.symbol_count} compact symbols / "
             f"{report.filler_count} fillers / "
             f"{report.abbreviation_count} acronyms/stutters / "
-            f"{mojibake_count} mojibake",
+            f"{mojibake_count} mojibake / "
+            f"{bracket_count} bracket imbalance",
             flush=True,
         )
 
@@ -467,6 +534,7 @@ def main() -> int:
         CATEGORY_FILLERS: sum(1 for r in all_rows if r.category == CATEGORY_FILLERS),
         CATEGORY_ACRONYMS: sum(1 for r in all_rows if r.category == CATEGORY_ACRONYMS),
         CATEGORY_MOJIBAKE: sum(1 for r in all_rows if r.category == CATEGORY_MOJIBAKE),
+        CATEGORY_BRACKETS: sum(1 for r in all_rows if r.category == CATEGORY_BRACKETS),
     }
 
     print()
@@ -488,6 +556,7 @@ def main() -> int:
     print(f"    Non-canonical Fillers: {category_counts[CATEGORY_FILLERS]}")
     print(f"    Acronyms and Stutters: {category_counts[CATEGORY_ACRONYMS]}")
     print(f"    Encoding / Mojibake: {category_counts[CATEGORY_MOJIBAKE]}")
+    print(f"    Bracket imbalance: {category_counts[CATEGORY_BRACKETS]}")
     print(f"  CSV: {output_path}")
 
     return 0
