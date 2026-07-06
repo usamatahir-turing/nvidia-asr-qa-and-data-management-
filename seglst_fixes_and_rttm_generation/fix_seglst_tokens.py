@@ -24,6 +24,7 @@ Output tree (overwritten on each run)::
 Token fixes applied to each segment's ``words`` field:
 
 - Add missing opening bracket: ``inhale]`` / ``inhale ]`` -> ``[inhale]``
+- Close after known NSV when ``[ inhale`` has no ``]``: ``[ inhale speech`` -> ``[inhale] speech``
 - Remove space after ``[``: ``[ exhale]`` -> ``[exhale]``
 - Hyphenate compounds: ``other- noise``, ``other - noise``, ``[other noise]`` -> ``[other-noise]``
 - Collapse repeated hyphens: ``clear--throat`` -> ``clear-throat``
@@ -168,6 +169,35 @@ def _shortest_repairable_nsv_suffix(token_run: str) -> str | None:
     return None
 
 
+def _shortest_repairable_nsv_prefix(words: str, start: int) -> tuple[int, str] | None:
+    """Return ``(end_exclusive, raw_text)`` for the shortest known NSV starting at *start*."""
+    if start >= len(words):
+        return None
+
+    for match in re.finditer(r"[A-Za-z]+", words[start:]):
+        end = start + match.end()
+        chunk = words[start:end]
+        if not _TOKEN_BODY_RE.fullmatch(chunk):
+            break
+        if _is_repairable_nsv_body(chunk):
+            return end, chunk
+    return None
+
+
+def _repair_unclosed_open_bracket(words: str, bracket_pos: int) -> tuple[str, int] | None:
+    """Repair ``[ inhale speech`` when a canonical NSV follows ``[`` but ``]`` is missing."""
+    pos = bracket_pos + 1
+    while pos < len(words) and words[pos].isspace():
+        pos += 1
+
+    match = _shortest_repairable_nsv_prefix(words, pos)
+    if match is None:
+        return None
+
+    end_pos, _raw = match
+    return f"[{normalize_token_content(words[pos:end_pos])}]", end_pos
+
+
 def _repair_missing_open_bracket(words: str, start: int, close: int) -> tuple[str, int] | None:
     """Repair ``inhale]``, ``inhale ]``, or ``...speech inhale ]`` without swallowing speech."""
     token_end = close
@@ -221,6 +251,13 @@ def fix_words(words: str) -> str:
         if ch == "[":
             close = words.find("]", i + 1)
             if close == -1:
+                repaired = _repair_unclosed_open_bracket(words, i)
+                if repaired is not None:
+                    replacement, next_i = repaired
+                    result.append(replacement)
+                    i = next_i
+                    continue
+                result.append("[")
                 i += 1
                 continue
             inner = words[i + 1 : close]
@@ -230,15 +267,13 @@ def fix_words(words: str) -> str:
 
         if ch.isascii() and ch.isalpha():
             close = words.find("]", i + 1)
-            if close == -1:
-                result.append(words[i:])
-                break
-            repaired = _repair_missing_open_bracket(words, i, close)
-            if repaired is not None:
-                replacement, next_i = repaired
-                result.append(replacement)
-                i = next_i
-                continue
+            if close != -1:
+                repaired = _repair_missing_open_bracket(words, i, close)
+                if repaired is not None:
+                    replacement, next_i = repaired
+                    result.append(replacement)
+                    i = next_i
+                    continue
 
         result.append(ch)
         i += 1
