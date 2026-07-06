@@ -61,6 +61,45 @@ DEFAULT_INPUT_DIR = Path("..") / "drive_data"
 DEFAULT_OUTPUT_DIR = Path("output_data")
 DEFAULT_BATCH_FILE = "batch_conversations_list.txt"
 
+# Canonical NSV token names (after ``normalize_token_content``).
+ALLOWED_NSVS = frozenset(
+    {
+        "breath",
+        "inhale",
+        "exhale",
+        "sigh",
+        "sniff",
+        "gasp",
+        "blow",
+        "laugh",
+        "chuckle",
+        "giggle",
+        "snort",
+        "scoff",
+        "grunt",
+        "groan",
+        "cry",
+        "hum-tune",
+        "whoop",
+        "whistle",
+        "tongue-click",
+        "tsk",
+        "lip-smack",
+        "teeth-suck",
+        "lip-trill",
+        "shush",
+        "swallow",
+        "clear-throat",
+        "cough",
+        "sneeze",
+        "yawn",
+        "hiccup",
+        "unintelligible",
+        "other-noise",
+        "click",
+    }
+)
+
 # Latin annotation token body (single or compound).
 _TOKEN_BODY_RE = re.compile(r"^[A-Za-z]+(?:-\s*[A-Za-z]+|\s+[A-Za-z]+)*$")
 # Trailing ``[`` with no token (e.g. ``inhale][`` -> ``[inhale]`` after other fixes).
@@ -102,6 +141,51 @@ def normalize_token_content(content: str) -> str:
     return TOKEN_SPELLING_FIXES.get(text, text)
 
 
+def _is_repairable_nsv_body(inner: str) -> bool:
+    return normalize_token_content(inner) in ALLOWED_NSVS
+
+
+def _segment_spans(text: str) -> list[tuple[int, int]]:
+    return [(match.start(), match.end()) for match in re.finditer(r"[A-Za-z]+", text)]
+
+
+def _shortest_repairable_nsv_suffix(token_run: str) -> str | None:
+    """Return the shortest trailing NSV suffix of a Latin token run, if any."""
+    token_run = token_run.strip()
+    if not token_run or not _TOKEN_BODY_RE.fullmatch(token_run):
+        return None
+
+    spans = _segment_spans(token_run)
+    if not spans:
+        return None
+
+    for start, _ in reversed(spans):
+        suffix = token_run[start:].strip()
+        if _TOKEN_BODY_RE.fullmatch(suffix) and _is_repairable_nsv_body(suffix):
+            return suffix
+    return None
+
+
+def _repair_missing_open_bracket(words: str, start: int, close: int) -> tuple[str, int] | None:
+    """Repair ``inhale]`` / ``...speech inhale]`` without swallowing preceding speech."""
+    inner = words[start:close]
+    if not _TOKEN_BODY_RE.fullmatch(inner):
+        return None
+
+    repair = _shortest_repairable_nsv_suffix(inner)
+    if repair is None:
+        return None
+
+    suffix_start = close - len(repair)
+    if words[suffix_start:close] != repair:
+        return None
+    if "[" in words[suffix_start:close]:
+        return None
+
+    prefix = words[start:suffix_start]
+    return prefix + f"[{normalize_token_content(repair)}]", close + 1
+
+
 def _repair_split_brackets(words: str) -> str:
     """Undo ``[i[nhale]`` -> ``[inhale]`` corruption if present."""
     while True:
@@ -136,10 +220,11 @@ def fix_words(words: str) -> str:
             if close == -1:
                 result.append(words[i:])
                 break
-            inner = words[i:close]
-            if _TOKEN_BODY_RE.fullmatch(inner):
-                result.append(f"[{normalize_token_content(inner)}]")
-                i = close + 1
+            repaired = _repair_missing_open_bracket(words, i, close)
+            if repaired is not None:
+                replacement, next_i = repaired
+                result.append(replacement)
+                i = next_i
                 continue
 
         result.append(ch)
