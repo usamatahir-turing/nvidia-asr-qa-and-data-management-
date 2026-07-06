@@ -40,6 +40,9 @@ Usage::
     python fix_seglst_tokens.py
     python fix_seglst_tokens.py --dry-run
     python fix_seglst_tokens.py --input path/to/drive_data --output path/to/output_data
+
+Only conversations listed in ``batch_conversations_list.txt`` (one folder name per line)
+are processed. Update that file before each batch run.
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ SEGLST_GLOB = "*_approved.seglst.json"
 SEGLST_FILENAME_RE = re.compile(r"^(.+)_(approved|fixed)\.seglst\.json$")
 DEFAULT_INPUT_DIR = Path("..") / "drive_data"
 DEFAULT_OUTPUT_DIR = Path("output_data")
+DEFAULT_BATCH_FILE = "batch_conversations_list.txt"
 
 # Latin annotation token body (single or compound).
 _TOKEN_BODY_RE = re.compile(r"^[A-Za-z]+(?:-\s*[A-Za-z]+|\s+[A-Za-z]+)*$")
@@ -230,6 +234,64 @@ def discover_files(input_root: Path) -> list[Path]:
     return sorted(input_root.glob(f"**/{SEGLST_GLOB}"))
 
 
+def load_batch_conversation_ids(batch_path: Path) -> list[str]:
+    """Load unique conversation folder names from a newline-separated batch file."""
+    if not batch_path.is_file():
+        raise FileNotFoundError(f"Batch file not found: {batch_path}")
+
+    seen: set[str] = set()
+    conversation_ids: list[str] = []
+    for line_number, raw_line in enumerate(batch_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in seen:
+            print(
+                f"Warning: duplicate conversation on line {line_number}: {line!r}",
+                file=sys.stderr,
+            )
+            continue
+        seen.add(line)
+        conversation_ids.append(line)
+
+    if not conversation_ids:
+        raise ValueError(f"No conversation IDs found in batch file: {batch_path}")
+
+    return conversation_ids
+
+
+def discover_files_for_batch(
+    input_root: Path,
+    conversation_ids: list[str],
+) -> tuple[list[Path], list[str], list[str]]:
+    """Return (seglst files, not_found_ids, no_seglst_ids) for the batch list."""
+    files: list[Path] = []
+    not_found: list[str] = []
+    no_seglst: list[str] = []
+
+    for conversation_id in conversation_ids:
+        task_dir = input_root / conversation_id
+        if not task_dir.is_dir():
+            not_found.append(conversation_id)
+            print(
+                f"Warning: conversation folder not found under {input_root}: "
+                f"{conversation_id!r}",
+                file=sys.stderr,
+            )
+            continue
+
+        conversation_files = sorted(task_dir.glob(SEGLST_GLOB))
+        if not conversation_files:
+            no_seglst.append(conversation_id)
+            print(
+                f"Warning: no {SEGLST_GLOB} files in {conversation_id!r}",
+                file=sys.stderr,
+            )
+            continue
+
+        files.extend(conversation_files)
+
+    return files, not_found, no_seglst
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -257,6 +319,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--batch-file",
+        type=Path,
+        default=script_dir / DEFAULT_BATCH_FILE,
+        help=(
+            "Newline-separated list of conversation folder names to process "
+            f"(default: {DEFAULT_BATCH_FILE} next to this script)"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Report changes without writing files",
@@ -265,6 +336,7 @@ def main() -> int:
 
     input_root = args.input.resolve()
     output_root = args.output.resolve()
+    batch_path = args.batch_file.resolve()
 
     if not input_root.is_dir():
         print(f"Error: input directory not found: {input_root}", file=sys.stderr)
@@ -277,13 +349,26 @@ def main() -> int:
         )
         return 1
 
-    files = discover_files(input_root)
+    try:
+        conversation_ids = load_batch_conversation_ids(batch_path)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    files, not_found, no_seglst = discover_files_for_batch(input_root, conversation_ids)
     if not files:
-        print(f"No {SEGLST_GLOB} files found under {input_root}", file=sys.stderr)
+        print(
+            f"No {SEGLST_GLOB} files found for any conversation in {batch_path.name}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Input : {input_root}")
     print(f"Output: {output_root}")
+    print(f"Batch : {batch_path} ({len(conversation_ids)} conversation(s))")
     if args.dry_run:
         print("Mode  : DRY RUN (no files will be written)")
     print()
@@ -315,10 +400,22 @@ def main() -> int:
     total_session = sum(r.session_id_changed for r in reports)
     total_speaker = sum(r.speaker_changed for r in reports)
     files_with_multiple_speakers = sum(1 for r in reports if r.multiple_speakers)
+    conversations_processed = len({r.task_id for r in reports})
 
     mode = "DRY RUN" if args.dry_run else "APPLIED"
     print()
-    print(f"[{mode}] Processed {total} file(s)")
+    print(f"[{mode}] Batch summary")
+    print(f"  Conversations requested: {len(conversation_ids)}")
+    print(f"  Conversations processed: {conversations_processed}")
+    print(f"  Not found under input: {len(not_found)}")
+    if not_found:
+        for conversation_id in not_found:
+            print(f"    - {conversation_id}")
+    print(f"  No {SEGLST_GLOB} files: {len(no_seglst)}")
+    if no_seglst:
+        for conversation_id in no_seglst:
+            print(f"    - {conversation_id}")
+    print(f"  Seglst files processed: {total}")
     print(f"  Segments with words changes: {total_words}")
     print(f"  Segments with session_id changes: {total_session}")
     print(f"  Segments with speaker changes: {total_speaker}")
