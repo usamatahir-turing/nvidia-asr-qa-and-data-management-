@@ -5,7 +5,7 @@ Runs the same checks as ``generate_report_v2.py`` (via ``transcription_ar_checks
 on ``*_approved.seglst.json`` files under ``output_data`` (after ``fix_seglst_tokens.py``).
 
 Also scans segment text for likely mojibake / encoding corruption and unbalanced
-NSV square brackets (CSV only).
+``()``, ``[]``, or ``{}`` (CSV only).
 
 Default layout::
 
@@ -77,7 +77,14 @@ MOJIBAKE_RECOMMENDATION = (
     "Possible encoding corruption (mojibake). Restore correct Unicode spelling."
 )
 BRACKET_RECOMMENDATION = (
-    "Square brackets are unbalanced. Add or remove '[' / ']' around NSV tokens."
+    "Brackets are unbalanced. Fix mismatched (), [], or {} in the segment."
+)
+
+# (open, close, label) — checked only by ``find_bracket_issues``.
+_BRACKET_PAIRS: tuple[tuple[str, str, str], ...] = (
+    ("[", "]", "square"),
+    ("{", "}", "curly"),
+    ("(", ")", "parenthesis"),
 )
 
 # High-signal fragments from UTF-8 text misread as Latin-1 / Windows-1252.
@@ -135,31 +142,38 @@ def find_mojibake_spans(words: str) -> list[tuple[int, int, str]]:
     return sorted(selected, key=lambda item: item[0])
 
 
-def find_bracket_issues(words: str) -> list[str]:
-    """Return human-readable NSV square-bracket imbalance issues."""
-    if "[" not in words and "]" not in words:
-        return []
-
+def _bracket_issues_for_pair(words: str, open_ch: str, close_ch: str) -> list[str]:
     issues: list[str] = []
-    open_count = words.count("[")
-    close_count = words.count("]")
+    open_count = words.count(open_ch)
+    close_count = words.count(close_ch)
     if open_count != close_count:
-        issues.append(f"{open_count} '[' vs {close_count} ']'")
+        issues.append(f"{open_count} {open_ch!r} vs {close_count} {close_ch!r}")
 
     depth = 0
     for ch in words:
-        if ch == "[":
+        if ch == open_ch:
             depth += 1
-        elif ch == "]":
+        elif ch == close_ch:
             if depth == 0:
-                issues.append("unmatched ']'")
+                issues.append(f"unmatched {close_ch!r}")
             else:
                 depth -= 1
 
     if depth == 1:
-        issues.append("unclosed '['")
+        issues.append(f"unclosed {open_ch!r}")
     elif depth > 1:
-        issues.append(f"{depth} unclosed '['")
+        issues.append(f"{depth} unclosed {open_ch!r}")
+    return issues
+
+
+def find_bracket_issues(words: str) -> list[str]:
+    """Return human-readable imbalance issues for ``()``, ``[]``, and ``{}``."""
+    if not any(open_ch in words or close_ch in words for open_ch, close_ch, _ in _BRACKET_PAIRS):
+        return []
+
+    issues: list[str] = []
+    for open_ch, close_ch, _label in _BRACKET_PAIRS:
+        issues.extend(_bracket_issues_for_pair(words, open_ch, close_ch))
 
     seen: set[str] = set()
     unique: list[str] = []
