@@ -28,6 +28,7 @@ Token fixes applied to each segment's ``words`` field:
 - Remove space after ``[``: ``[ exhale]`` -> ``[exhale]``
 - Hyphenate compounds: ``other- noise``, ``other - noise``, ``[other noise]`` -> ``[other-noise]``
 - Collapse repeated hyphens: ``clear--throat`` -> ``clear-throat``
+- Collapse duplicate brackets: ``[[inhale]`` / ``[inhale]]`` -> ``[inhale]``
 - Lowercase token text inside brackets
 - Correct common token misspellings (see ``TOKEN_SPELLING_FIXES``)
 
@@ -109,6 +110,8 @@ _TRAILING_ORPHAN_BRACKET_RE = re.compile(r"\[$")
 # Repair accidental ``[i[nhale]`` corruption from an earlier regex-based pass.
 _SPLIT_BRACKET_RE = re.compile(r"\[([a-z])\[([a-z-]+)\]")
 _MULTI_DASH_RE = re.compile(r"-{2,}")
+_DUPLICATE_OPEN_BRACKET_RE = re.compile(r"\[{2,}")
+_DUPLICATE_CLOSE_BRACKET_RE = re.compile(r"\]{2,}")
 
 # Misspelling -> canonical token text (applied after bracket and hyphen normalization).
 TOKEN_SPELLING_FIXES: dict[str, str] = {
@@ -238,9 +241,17 @@ def _collapse_extra_dashes(words: str) -> str:
     return _MULTI_DASH_RE.sub("-", words)
 
 
+def _collapse_duplicate_brackets(words: str) -> str:
+    """Replace runs of ``[[`` / ``]]`` with a single bracket."""
+    return _DUPLICATE_CLOSE_BRACKET_RE.sub(
+        "]",
+        _DUPLICATE_OPEN_BRACKET_RE.sub("[", words),
+    )
+
+
 def fix_words(words: str) -> str:
     """Apply all token normalization rules to a words string."""
-    words = _repair_split_brackets(words)
+    words = _collapse_duplicate_brackets(_repair_split_brackets(words))
 
     result: list[str] = []
     i = 0
@@ -280,6 +291,7 @@ def fix_words(words: str) -> str:
 
     output = "".join(result)
     output = _TRAILING_ORPHAN_BRACKET_RE.sub("", output)
+    output = _collapse_duplicate_brackets(output)
     return _collapse_extra_dashes(output)
 
 
