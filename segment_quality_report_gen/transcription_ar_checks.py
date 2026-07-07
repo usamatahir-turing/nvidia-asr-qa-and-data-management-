@@ -2,7 +2,7 @@
 """Transcription annotation review checks for seglst JSON files.
 
 Detects:
-  1. Numeric words (digits-only tokens that should be spoken-form).
+  1. Numeric words (digit tokens and grouped/decimal forms that should be spoken-form).
   2. Unknown NSV tokens (bracket annotations not in the allowed list).
   3. Compact written symbols (@ . / : -) in URLs, emails, paths, etc.
   4. Non-canonical filler words (language-specific, from task folder code).
@@ -58,7 +58,17 @@ ALLOWED_NSVS = frozenset(
     }
 )
 
-NUMERIC_WORD_RE = re.compile(r"^\d+$")
+NUMERIC_WORD_RE = re.compile(
+    r"^(?:"
+    r"\d+"
+    r"|"
+    r"\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+    r"|"
+    r"\d{1,3}(?:\.\d{3})+(?:,\d+)?"
+    r"|"
+    r"\d+[.,]\d+"
+    r")$"
+)
 _TOKEN_BODY_RE = re.compile(r"^[A-Za-z]+(?:-\s*[A-Za-z]+|\s+[A-Za-z]+)*$")
 _WORD_EDGE_PUNCT_RE = re.compile(r"^[^\w]+|[^\w]+$")
 
@@ -316,15 +326,17 @@ def normalize_nsv_content(content: str) -> str:
 
 
 def is_numeric_word(token: str) -> bool:
-    """True when the token is digits-only (e.g. ``191``), not ``3D``."""
+    """True for digit tokens including grouped thousands and decimals (not ``3D``)."""
     core = _WORD_EDGE_PUNCT_RE.sub("", token)
     if not core:
+        return False
+    if not core.replace(",", "").replace(".", "").isdigit():
         return False
     return NUMERIC_WORD_RE.fullmatch(core) is not None
 
 
 def find_numeric_tokens(words: str) -> list[str]:
-    """Return distinct digit-only words found in a segment transcript."""
+    """Return distinct numeric words found in a segment transcript."""
     found: list[str] = []
     seen: set[str] = set()
     for raw in words.split():
