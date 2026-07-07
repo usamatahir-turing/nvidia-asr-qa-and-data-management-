@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Resample WAV files on pre-delivery Drive to 48 kHz using ffmpeg.
 
-Walks each conversation subfolder under the pre-delivery Drive root, downloads
-each ``.wav`` file, resamples to 48 kHz when needed, and uploads the result back
-to Drive.
+Walks each conversation subfolder under the pre-delivery Drive root. For each
+``.wav`` file, reads only the WAV header from Drive to detect sample rate; files
+already at 48 kHz are skipped without downloading the full audio. Files at other
+rates are downloaded, resampled to 48 kHz, and uploaded back to Drive.
 
 Example::
 
@@ -30,6 +31,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 PRE_DELIVERY_DRIVE_FOLDER_ID = "1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf"
 TARGET_SERVICE_ACCOUNT = "delivery-nvidia@delivery-nvidia.iam.gserviceaccount.com"
 TARGET_SAMPLE_RATE = 48_000
+WAV_PROBE_BYTES = 4096
 WAV_SUFFIX = ".wav"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 WAV_MIME = "audio/wav"
@@ -134,6 +136,44 @@ def download_drive_file(service, file_id: str, dest_path: Path) -> None:
             _status, done = downloader.next_chunk()
 
 
+def download_wav_header(service, file_id: str) -> bytes:
+    """Download only the first few KB of a Drive file (WAV header probe)."""
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    request.headers["Range"] = f"bytes=0-{WAV_PROBE_BYTES - 1}"
+    content = request.execute()
+    if not content:
+        raise ValueError("Empty response when reading WAV header")
+    return content[:WAV_PROBE_BYTES]
+
+
+def parse_wav_sample_rate(header: bytes) -> int:
+    """Return sample rate from a WAV header buffer."""
+    if len(header) < 12 or header[0:4] != b"RIFF" or header[8:12] != b"WAVE":
+        raise ValueError("Not a valid WAV file header")
+
+    offset = 12
+    while offset + 8 <= len(header):
+        chunk_id = header[offset : offset + 4]
+        chunk_size = int.from_bytes(header[offset + 4 : offset + 8], "little")
+        offset += 8
+        if chunk_id == b"fmt ":
+            if offset + 8 > len(header):
+                raise ValueError("Incomplete fmt chunk in WAV header")
+            return int.from_bytes(header[offset + 4 : offset + 8], "little")
+        offset += chunk_size + (chunk_size % 2)
+
+    raise ValueError("fmt chunk not found in WAV header")
+
+
+def probe_remote_sample_rate(service, file_id: str) -> int | None:
+    """Read sample rate from Drive via header-only download, or None if unknown."""
+    header = download_wav_header(service, file_id)
+    try:
+        return parse_wav_sample_rate(header)
+    except ValueError:
+        return None
+
+
 def upload_drive_file(service, file_id: str, local_path: Path) -> None:
     media = MediaFileUpload(str(local_path), mimetype=WAV_MIME, resumable=True)
     service.files().update(
@@ -199,12 +239,18 @@ def process_wav(
     output_path = work_dir / "output.wav"
 
     try:
-        download_drive_file(service, file_id, input_path)
-        old_rate = probe_sample_rate(input_path)
+        old_rate = probe_remote_sample_rate(service, file_id)
 
         if old_rate == TARGET_SAMPLE_RATE:
-            print(f"{label}: {old_rate} Hz -> {TARGET_SAMPLE_RATE} Hz (no change)")
+            print(f"{label}: {old_rate} Hz (header check, no download)")
             return "skipped"
+
+        download_drive_file(service, file_id, input_path)
+        if old_rate is None:
+            old_rate = probe_sample_rate(input_path)
+            if old_rate == TARGET_SAMPLE_RATE:
+                print(f"{label}: {old_rate} Hz -> {TARGET_SAMPLE_RATE} Hz (no change)")
+                return "skipped"
 
         resample_wav(input_path, output_path)
         new_rate = probe_sample_rate(output_path)

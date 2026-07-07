@@ -141,6 +141,7 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "unintelligble": "unintelligible",
     "inuntelligible": "unintelligible",
     "unintellegible": "unintelligible",
+    "uninetlligible": "unintelligible",
     # -> inhale
     "nhale": "inhale",
     "inahel": "inhale",

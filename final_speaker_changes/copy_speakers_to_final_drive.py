@@ -16,6 +16,7 @@ Usage::
     python copy_speakers_to_final_drive.py
     python copy_speakers_to_final_drive.py NV-AR-SS06-CONVO16 NV-KO-SS05-CONVO13
     python copy_speakers_to_final_drive.py --dry-run NV-GR-SS04-CONVO10
+    python copy_speakers_to_final_drive.py --resume
 """
 
 from __future__ import annotations
@@ -258,6 +259,41 @@ def destination_filenames(spk_name: str) -> tuple[str, str, str]:
     )
 
 
+def expected_destination_filenames(
+    speaker_mappings: list[SpeakerMapping],
+    source_items: dict[str, dict],
+) -> set[str]:
+    """Return destination file names required for a fully copied conversation."""
+    expected: set[str] = set()
+    for mapping in speaker_mappings:
+        expected.update(destination_filenames(mapping.spk_name))
+    expected.update(discover_mixed_wav_files(source_items))
+    return expected
+
+
+def is_conversation_complete_on_dest(
+    dest_items: dict[str, dict],
+    speaker_mappings: list[SpeakerMapping],
+    source_items: dict[str, dict],
+) -> bool:
+    expected = expected_destination_filenames(speaker_mappings, source_items)
+    return all(name in dest_items for name in expected)
+
+
+def conversation_complete_on_dest(
+    service,
+    conversation: str,
+    speaker_mappings: list[SpeakerMapping],
+    source_items: dict[str, dict],
+    dest_folders: dict[str, dict],
+) -> bool:
+    """Return True when the destination folder has every expected delivery file."""
+    if conversation not in dest_folders:
+        return False
+    dest_items = get_drive_items(service, dest_folders[conversation]["id"])
+    return is_conversation_complete_on_dest(dest_items, speaker_mappings, source_items)
+
+
 def build_speaker_mappings(
     conversation: str,
     source_items: dict[str, dict],
@@ -458,6 +494,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write mappings.csv and report uploads without writing to destination Drive",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip conversations that already have all expected files on destination "
+            "Drive (use after an interrupted run)"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -477,10 +521,12 @@ def main() -> int:
     print(f"Destination Drive folder: {DEST_DRIVE_FOLDER_ID}")
     if args.dry_run:
         print("Mode: DRY RUN (destination Drive will not be modified)")
+    if args.resume:
+        print("Mode: RESUME (skipping conversations already complete on destination)")
     print(f"Conversations to process: {', '.join(conversations)}")
 
     all_mappings: list[SpeakerMapping] = []
-    planned: list[tuple[str, list[SpeakerMapping]]] = []
+    planned: list[tuple[str, list[SpeakerMapping], dict[str, dict]]] = []
     failures = 0
 
     for conversation in conversations:
@@ -503,7 +549,7 @@ def main() -> int:
             continue
 
         all_mappings.extend(mappings)
-        planned.append((conversation, mappings))
+        planned.append((conversation, mappings, source_items))
 
     if not planned:
         warn("Error: no conversations could be mapped")
@@ -512,8 +558,31 @@ def main() -> int:
     write_mappings_csv(args.mappings_out, all_mappings)
     print(f"Wrote {len(all_mappings)} mapping row(s) to {args.mappings_out}")
 
+    dest_folders = (
+        list_conversation_folders(service, DEST_DRIVE_FOLDER_ID) if args.resume else {}
+    )
+    to_copy: list[tuple[str, list[SpeakerMapping], dict[str, dict]]] = []
+    skipped_resume = 0
+
+    for conversation, mappings, source_items in planned:
+        if args.resume and conversation_complete_on_dest(
+            service,
+            conversation,
+            mappings,
+            source_items,
+            dest_folders,
+        ):
+            print(f"Skipping {conversation} (already complete on destination)")
+            skipped_resume += 1
+            continue
+        to_copy.append((conversation, mappings, source_items))
+
+    if args.resume and not to_copy:
+        print("All conversations already complete on destination.")
+        return 0
+
     successes = 0
-    for conversation, mappings in planned:
+    for conversation, mappings, _source_items in to_copy:
         ok = copy_conversation(
             service,
             conversation,
@@ -529,6 +598,8 @@ def main() -> int:
 
     print()
     print(f"Completed: {successes} conversation(s)")
+    if args.resume:
+        print(f"Skipped  : {skipped_resume} conversation(s) (already on destination)")
     if failures:
         print(f"Failed   : {failures} conversation(s)", file=sys.stderr)
         return 1
