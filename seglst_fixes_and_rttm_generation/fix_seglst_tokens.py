@@ -160,6 +160,7 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "exahle": "exhale",
     # -> chuckle
     "chucke": "chuckle",
+    "chukle": "chuckle",
 }
 
 
