@@ -3,7 +3,7 @@ import io
 import argparse
 import requests
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import google.auth
 from google.auth.transport.requests import Request
@@ -45,13 +45,15 @@ def get_authenticated_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 
-def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination_dir):
+def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination_dir, *, days=30):
     # State tracking across recursive calls
-    stats = {'downloaded': 0, 'skipped': 0, 'deleted': 0}
+    stats = {'downloaded': 0, 'skipped': 0, 'excluded_old': 0, 'deleted': 0}
     valid_local_paths = set()
-    
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
     print(f"\nStarting recursive sync for root folder ID: {root_folder_id}")
-    print(f"Destination: {root_destination_dir}\n")
+    print(f"Destination: {root_destination_dir}")
+    print(f"Sync window: files modified on or after {cutoff.isoformat()} ({days} day(s))\n")
 
     def process_folder(drive_folder_id, current_local_dir):
         # 1. Create the local directory if it doesn't exist
@@ -76,15 +78,13 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                 file_id = f['id']
                 file_name = f['name']
                 file_path = os.path.join(current_local_dir, file_name)
-                
-                # Add this exact path to our tracker so it doesn't get deleted later
-                valid_local_paths.add(file_path)
 
                 # 2. If it's a folder, RECURSE into it
                 if f['mimeType'] == 'application/vnd.google-apps.folder':
+                    valid_local_paths.add(file_path)
                     process_folder(file_id, file_path)
                     continue
-                    
+
                 # Skip Google Workspace documents (Docs, Sheets)
                 if 'application/vnd.google-apps' in f['mimeType']:
                     continue
@@ -92,6 +92,13 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                 # 3. File Processing & Timestamps
                 drive_time_str = f['modifiedTime']
                 drive_mtime = datetime.fromisoformat(drive_time_str.replace('Z', '+00:00'))
+
+                if drive_mtime < cutoff:
+                    stats['excluded_old'] += 1
+                    continue
+
+                # Track recent Drive files so older local copies are cleaned up later
+                valid_local_paths.add(file_path)
 
                 needs_download = True
                 if os.path.exists(file_path):
@@ -152,21 +159,37 @@ def mirror_folder_sync_recursive(drive_service, root_folder_id, root_destination
                 stats['deleted'] += 1
                 print(f"Deleted orphaned directory tree: {dir_path}")
 
-    print(f"\nMirror Complete! Downloaded: {stats['downloaded']} | Skipped: {stats['skipped']} | Deleted: {stats['deleted']}")
+    print(
+        f"\nMirror Complete! Downloaded: {stats['downloaded']} | "
+        f"Skipped (up to date): {stats['skipped']} | "
+        f"Excluded (older than {days} day(s) on Drive): {stats['excluded_old']} | "
+        f"Deleted: {stats['deleted']}"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Recursively mirror a Google Drive folder locally.")
     parser.add_argument("folder_id", nargs='?', default="1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1", help="The ID of the root Google Drive folder to mirror (default: 1D8isShidIb1hcZuCezV-Qe7EsmsmKBR1).")
     parser.add_argument("--destination", default="drive_data", help="The local directory to mirror into.")
-    
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="Only download Drive files modified within this many days (default: 30).",
+    )
+
     args = parser.parse_args()
+
+    if args.days < 1:
+        parser.error("--days must be at least 1")
     
     if not os.path.exists(args.destination):
         os.makedirs(args.destination)
         
     try:
         drive_svc = get_authenticated_drive_service()
-        mirror_folder_sync_recursive(drive_svc, args.folder_id, args.destination)
+        mirror_folder_sync_recursive(
+            drive_svc, args.folder_id, args.destination, days=args.days
+        )
     except Exception as e:
         print(f"\nScript failed: {e}")
