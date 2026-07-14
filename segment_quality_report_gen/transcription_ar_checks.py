@@ -317,8 +317,11 @@ def _format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:06.3f}"
 
 
+_ZERO_WIDTH_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+
+
 def normalize_nsv_content(content: str) -> str:
-    text = content.strip()
+    text = _ZERO_WIDTH_RE.sub("", content).strip()
     text = re.sub(r"\s*-\s*", "-", text)
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text)

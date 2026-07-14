@@ -30,6 +30,7 @@ Token fixes applied to each segment's ``words`` field:
 - Collapse repeated hyphens: ``clear--throat`` -> ``clear-throat``
 - Collapse duplicate brackets: ``[[inhale]`` / ``[inhale]]`` -> ``[inhale]``
 - Remove empty brackets: ``[]``, ``()``, ``{}`` (optional whitespace inside) -> ````
+- Remove zero-width / invisible format characters (e.g. U+200B in ``[​inhale]``)
 - Lowercase token text inside brackets
 - Correct common token misspellings (see ``TOKEN_SPELLING_FIXES``)
 - Rename deprecated NSV: ``[click]`` -> ``[other-noise]``
@@ -122,6 +123,8 @@ _MULTI_DASH_RE = re.compile(r"-{2,}")
 _DUPLICATE_OPEN_BRACKET_RE = re.compile(r"\[{2,}")
 _DUPLICATE_CLOSE_BRACKET_RE = re.compile(r"\]{2,}")
 _EMPTY_BRACKET_RE = re.compile(r"\[\s*\]|\{\s*\}|\(\s*\)")
+# Zero-width / invisible format chars that can break NSV matching (e.g. U+200B).
+_ZERO_WIDTH_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
 
 # Misspelling -> canonical token text (applied after bracket and hyphen normalization).
 TOKEN_SPELLING_FIXES: dict[str, str] = {
@@ -142,14 +145,30 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "inuntelligible": "unintelligible",
     "unintellegible": "unintelligible",
     "uninetlligible": "unintelligible",
+    "intelligible": "unintelligible",
+    "unintelliglble": "unintelligible",
+    "untelligible": "unintelligible",
+
     # -> inhale
     "nhale": "inhale",
     "inahel": "inhale",
     "inahle": "inhale",
+    "innhale": "inhale",
+    "iinhale": "inhale",
     # -> other-noise
     "click": "other-noise",
     "other-nosei": "other-noise",
     "othe-noise": "other-noise",
+    "pther-noise": "other-noise",
+    "other-noiuse": "other-noise",
+    "other-nosie": "other-noise",
+    "noise": "other-noise",
+    "othre-noise": "other-noise",
+    "other-npise": "other-noise",
+    "other-noies": "other-noise",
+    "other-noise~": "other-noise",
+    "ther-noise": "other-noise",
+    "orher-noise": "other-noise",
     # -> lip-smack
     "lop-smack": "lip-smack",
     "lips-smack": "lip-smack",
@@ -157,17 +176,37 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "tongue-clik": "tongue-click",
     # -> breath
     "breathe": "breath",
+    "braeth": "breath",
+    "breaht": "breath",
     # -> exhale
     "exahle": "exhale",
     # -> chuckle
     "chucke": "chuckle",
     "chukle": "chuckle",
+    "chuckel": "chuckle",
+    # -> laugh
+    "laughter": "laugh",
+    # -> lip-smack
+    "smack": "lip-smack",
+    "tongue-suck": "lip-smack",
+    # -> teeth-suck
+    "suck-teeth": "teeth-suck",
+    "teeh-suck": "teeth-suck",
+    "teech-suck": "teeth-suck",
+
+    # -> cough
+    "caugh": "cough",
 }
+
+
+def _remove_zero_width_chars(text: str) -> str:
+    """Strip zero-width space and related invisible format characters."""
+    return _ZERO_WIDTH_RE.sub("", text)
 
 
 def normalize_token_content(content: str) -> str:
     """Normalize the interior of a bracket token."""
-    text = content.strip()
+    text = _remove_zero_width_chars(content).strip()
     text = re.sub(r"\s*-\s*", "-", text)
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text)
@@ -288,6 +327,7 @@ def _remove_empty_brackets(words: str) -> str:
 
 def fix_words(words: str) -> str:
     """Apply all token normalization rules to a words string."""
+    words = _remove_zero_width_chars(words)
     words = _remove_empty_brackets(
         _collapse_duplicate_brackets(_repair_split_brackets(words))
     )
