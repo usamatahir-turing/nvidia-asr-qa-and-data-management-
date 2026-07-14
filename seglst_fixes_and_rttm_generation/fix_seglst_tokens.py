@@ -148,6 +148,7 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "intelligible": "unintelligible",
     "unintelliglble": "unintelligible",
     "untelligible": "unintelligible",
+    "unitellegible": "unintelligible",
 
     # -> inhale
     "nhale": "inhale",
@@ -155,6 +156,8 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "inahle": "inhale",
     "innhale": "inhale",
     "iinhale": "inhale",
+    "ihhale": "inhale",
+
     # -> other-noise
     "click": "other-noise",
     "other-nosei": "other-noise",
@@ -172,6 +175,7 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     # -> lip-smack
     "lop-smack": "lip-smack",
     "lips-smack": "lip-smack",
+    "lip-mack": "lip-smack",
     # -> tongue-click
     "tongue-clik": "tongue-click",
     # -> breath
@@ -196,6 +200,9 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
 
     # -> cough
     "caugh": "cough",
+
+    # -> clear-throat
+    "cleart-throat": "clear-throat",
 }
 
 
