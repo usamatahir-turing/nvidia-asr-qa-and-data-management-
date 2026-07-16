@@ -229,8 +229,8 @@ def _segment_spans(text: str) -> list[tuple[int, int]]:
     return [(match.start(), match.end()) for match in re.finditer(r"[A-Za-z]+", text)]
 
 
-def _shortest_repairable_nsv_suffix(token_run: str) -> str | None:
-    """Return the shortest trailing NSV suffix of a Latin token run, if any."""
+def _longest_repairable_nsv_suffix(token_run: str) -> str | None:
+    """Return the longest trailing NSV suffix of a Latin token run, if any."""
     token_run = token_run.strip()
     if not token_run or not _TOKEN_BODY_RE.fullmatch(token_run):
         return None
@@ -239,11 +239,13 @@ def _shortest_repairable_nsv_suffix(token_run: str) -> str | None:
     if not spans:
         return None
 
-    for start, _ in reversed(spans):
+    best: str | None = None
+    for start, _ in spans:
         suffix = token_run[start:].strip()
         if _TOKEN_BODY_RE.fullmatch(suffix) and _is_repairable_nsv_body(suffix):
-            return suffix
-    return None
+            if best is None or len(suffix) > len(best):
+                best = suffix
+    return best
 
 
 def _shortest_repairable_nsv_prefix(words: str, start: int) -> tuple[int, str] | None:
@@ -287,7 +289,7 @@ def _repair_missing_open_bracket(words: str, start: int, close: int) -> tuple[st
     if not _TOKEN_BODY_RE.fullmatch(inner):
         return None
 
-    repair = _shortest_repairable_nsv_suffix(inner)
+    repair = _longest_repairable_nsv_suffix(inner)
     if repair is None:
         return None
 
