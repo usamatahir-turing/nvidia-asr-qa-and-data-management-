@@ -3,12 +3,10 @@ import os
 import sys
 from dataclasses import dataclass, field
 import requests
-from datetime import datetime, timezone
 import google.auth
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as Oauth2Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 # Configuration
@@ -219,95 +217,50 @@ def get_drive_items(service, folder_id):
     return items
 
 def upload_files_recursive(service, local_path, drive_parent_id, current_rel_path=""):
-    """Recursively syncs local files and folders to Google Drive."""
-    # 1. Get current items on Drive
+    """Upload local files to Drive; skip names that already exist; never delete Drive files."""
     drive_items = get_drive_items(service, drive_parent_id)
-    active_local_names = set()
 
     for item in os.listdir(local_path):
         item_path = os.path.join(local_path, item)
-        active_local_names.add(item)
-        
+
         if os.path.isdir(item_path):
-            # Handle Folder
             if item in drive_items and drive_items[item]['mimeType'] == 'application/vnd.google-apps.folder':
                 folder_id = drive_items[item]['id']
                 print(f"Folder exists: {item}")
             else:
                 print(f"Creating folder: {item}")
                 folder_id = create_drive_folder(service, item, drive_parent_id)
-            
-            # Recurse, passing along the relative path to keep drive_data in sync
+
             upload_files_recursive(service, item_path, folder_id, os.path.join(current_rel_path, item))
-        
+
         else:
-            # Handle File Sync Logic
             def sync_file(file_to_upload_path, filename):
-                active_local_names.add(filename)
                 file_metadata = {'name': filename, 'parents': [drive_parent_id]}
-                local_mtime_ts = os.path.getmtime(file_to_upload_path)
-                local_mtime = datetime.fromtimestamp(local_mtime_ts, tz=timezone.utc)
 
-                needs_upload = True
                 if filename in drive_items:
-                    drive_file = drive_items[filename]
-                    drive_mtime = datetime.fromisoformat(drive_file['modifiedTime'].replace('Z', '+00:00'))
-                    if drive_mtime >= local_mtime:
-                        needs_upload = False
+                    print(f"Skipping (already on Drive): {filename}")
+                    return
 
-                if needs_upload:
-                    print(f"Uploading: {filename}...")
-                    media = MediaFileUpload(file_to_upload_path, resumable=True)
-                    if filename in drive_items:
-                        service.files().update(
-                            fileId=drive_items[filename]['id'],
-                            media_body=media,
-                            supportsAllDrives=True
-                        ).execute()
-                    else:
-                        service.files().create(
-                            body=file_metadata,
-                            media_body=media,
-                            fields='id',
-                            supportsAllDrives=True
-                        ).execute()
+                print(f"Uploading: {filename}...")
+                media = MediaFileUpload(file_to_upload_path, resumable=True)
+                created = service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id, name',
+                    supportsAllDrives=True
+                ).execute()
+                drive_items[created['name']] = created
 
-            # Sync the actual file from output_data
             sync_file(item_path, item)
 
-            # TASK: If it's an .rttm, find and sync the corresponding .wav from drive_data
             if item.endswith('.rttm'):
                 wav_filename = item.replace('.rttm', '.wav')
                 wav_local_path = os.path.join(DRIVE_DATA_ROOT, current_rel_path, wav_filename)
-                
+
                 if os.path.exists(wav_local_path):
                     sync_file(wav_local_path, wav_filename)
                 else:
                     print(f"Warning: Corresponding WAV not found: {wav_local_path}")
-
-    # 2. Cleanup: Remove files on Drive that no longer exist locally (including synced WAVs).
-    # Keep mixed wavs — they are not uploaded from output_data and must not be deleted.
-    for drive_item_name, drive_item_info in drive_items.items():
-        if drive_item_name not in active_local_names:
-            if drive_item_name.endswith(WAV_SUFFIX) and "_mixed" in drive_item_name:
-                print(f"Skipping cleanup of mixed wav: {drive_item_name}")
-                continue
-            print(f"Deleting orphaned Drive item: {drive_item_name}")
-            try:
-                service.files().delete(
-                    fileId=drive_item_info['id'],
-                    supportsAllDrives=True
-                ).execute()
-            except HttpError as exc:
-                status = getattr(exc.resp, "status", None)
-                if status in (403, 404):
-                    print(
-                        f"Warning: could not delete {drive_item_name} "
-                        f"(HTTP {status}); continuing",
-                        file=sys.stderr,
-                    )
-                    continue
-                raise
 
     if current_rel_path:
         print_task_speaker_report(current_rel_path)
@@ -364,8 +317,9 @@ def upload_task_folders(service, source_dir: str, drive_parent_id: str, task_nam
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Upload seglst/rttm files from output_data to the pre-delivery Drive folder, "
-            "including matching channel wav files from drive_data."
+            "Upload seglst/rttm files from output_data to the pre-delivery Drive folder "
+            "(plus matching channel wavs from drive_data). Files that already exist on "
+            "Drive by name are skipped; extra Drive files are left untouched."
         )
     )
     parser.add_argument(
