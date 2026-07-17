@@ -215,7 +215,7 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     # -> clear-throat
     "cleart-throat": "clear-throat",
     "clear-thorat": "clear-throat",
-    "clear-throat": "clear-throat"
+    "clear-through": "clear-throat"
 }
 
 
