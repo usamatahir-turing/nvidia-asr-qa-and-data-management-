@@ -177,6 +177,8 @@ TOKEN_SPELLING_FIXES: dict[str, str] = {
     "other-noise~": "other-noise",
     "ther-noise": "other-noise",
     "orher-noise": "other-noise",
+    "othere-noise": "other-noise"
+    
     # -> lip-smack
     "lop-smack": "lip-smack",
     "lips-smack": "lip-smack",
