@@ -8,6 +8,7 @@ import google.auth
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as Oauth2Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 # Configuration
@@ -292,10 +293,21 @@ def upload_files_recursive(service, local_path, drive_parent_id, current_rel_pat
                 print(f"Skipping cleanup of mixed wav: {drive_item_name}")
                 continue
             print(f"Deleting orphaned Drive item: {drive_item_name}")
-            service.files().delete(
-                fileId=drive_item_info['id'],
-                supportsAllDrives=True
-            ).execute()
+            try:
+                service.files().delete(
+                    fileId=drive_item_info['id'],
+                    supportsAllDrives=True
+                ).execute()
+            except HttpError as exc:
+                status = getattr(exc.resp, "status", None)
+                if status in (403, 404):
+                    print(
+                        f"Warning: could not delete {drive_item_name} "
+                        f"(HTTP {status}); continuing",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise
 
     if current_rel_path:
         print_task_speaker_report(current_rel_path)
