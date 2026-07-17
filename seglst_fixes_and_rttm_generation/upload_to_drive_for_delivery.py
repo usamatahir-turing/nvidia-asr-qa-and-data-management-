@@ -284,9 +284,13 @@ def upload_files_recursive(service, local_path, drive_parent_id, current_rel_pat
                 else:
                     print(f"Warning: Corresponding WAV not found: {wav_local_path}")
 
-    # 2. Cleanup: Remove files on Drive that no longer exist locally (including synced WAVs)
+    # 2. Cleanup: Remove files on Drive that no longer exist locally (including synced WAVs).
+    # Keep mixed wavs — they are not uploaded from output_data and must not be deleted.
     for drive_item_name, drive_item_info in drive_items.items():
         if drive_item_name not in active_local_names:
+            if drive_item_name.endswith(WAV_SUFFIX) and "_mixed" in drive_item_name:
+                print(f"Skipping cleanup of mixed wav: {drive_item_name}")
+                continue
             print(f"Deleting orphaned Drive item: {drive_item_name}")
             service.files().delete(
                 fileId=drive_item_info['id'],
