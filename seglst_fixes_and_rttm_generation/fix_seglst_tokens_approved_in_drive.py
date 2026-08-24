@@ -14,14 +14,18 @@ Example::
     python fix_seglst_tokens_approved_in_drive.py --dry-run
     python fix_seglst_tokens_approved_in_drive.py NV-KO-SS03-CONVO08
     python fix_seglst_tokens_approved_in_drive.py NV-EN-SS14-CONVO34 NV-KO-SS13-CONVO30
+    python fix_seglst_tokens_approved_in_drive.py --resume
+    python fix_seglst_tokens_approved_in_drive.py --seed-completed-before NV-IT-SS15-CONVO39 --resume
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import google.auth
@@ -43,6 +47,7 @@ TARGET_SERVICE_ACCOUNT = "delivery-nvidia@delivery-nvidia.iam.gserviceaccount.co
 FOLDER_MIME = "application/vnd.google-apps.folder"
 JSON_MIME = "application/json"
 APPROVED_SUFFIX = "_approved.seglst.json"
+DEFAULT_PROGRESS_FILE = Path(__file__).resolve().parent / "fix_approved_drive_progress.json"
 
 
 def get_authenticated_drive_service():
@@ -166,6 +171,72 @@ def upload_drive_file(service, file_id: str, local_path: Path) -> None:
     ).execute()
 
 
+def load_progress(path: Path) -> dict:
+    if not path.is_file():
+        return {"drive_folder_id": DRIVE_FOLDER_ID, "completed": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        print(f"Warning: could not parse progress file {path}; starting empty", file=sys.stderr)
+        return {"drive_folder_id": DRIVE_FOLDER_ID, "completed": {}}
+    if not isinstance(data, dict):
+        return {"drive_folder_id": DRIVE_FOLDER_ID, "completed": {}}
+    completed = data.get("completed")
+    if not isinstance(completed, dict):
+        completed = {}
+    return {"drive_folder_id": data.get("drive_folder_id", DRIVE_FOLDER_ID), "completed": completed}
+
+
+def save_progress(path: Path, progress: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(progress, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def mark_conversation_complete(
+    progress: dict,
+    path: Path,
+    conversation: str,
+    *,
+    files: int,
+    note: str = "",
+) -> None:
+    entry = {
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "files": files,
+    }
+    if note:
+        entry["note"] = note
+    progress["completed"][conversation] = entry
+    save_progress(path, progress)
+
+
+def seed_completed_before(
+    progress: dict,
+    path: Path,
+    all_conversations: list[str],
+    cutoff: str,
+) -> int:
+    """Mark conversations alphabetically before *cutoff* as complete."""
+    seeded = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for name in all_conversations:
+        if name >= cutoff:
+            break
+        if name in progress["completed"]:
+            continue
+        progress["completed"][name] = {
+            "completed_at": now,
+            "files": 0,
+            "note": f"seeded before {cutoff}",
+        }
+        seeded += 1
+    if seeded:
+        save_progress(path, progress)
+    return seeded
+
+
 def print_file_warnings(report: FileReport, src_path: Path) -> None:
     if report.multiple_speakers:
         print(
@@ -241,6 +312,37 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Download and report fixes without overwriting Drive files",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip conversations already recorded as complete in the progress file "
+            "(use after an interrupted run)"
+        ),
+    )
+    parser.add_argument(
+        "--progress-file",
+        type=Path,
+        default=DEFAULT_PROGRESS_FILE,
+        help=(
+            "JSON progress file used with --resume "
+            f"(default: {DEFAULT_PROGRESS_FILE.name} next to this script)"
+        ),
+    )
+    parser.add_argument(
+        "--clear-progress",
+        action="store_true",
+        help="Clear the progress file before starting (starts a fresh batch)",
+    )
+    parser.add_argument(
+        "--seed-completed-before",
+        metavar="CONVERSATION",
+        help=(
+            "Mark all conversation folders alphabetically before this name as "
+            "complete in the progress file (for bootstrapping after a crash "
+            "with no progress file). Combine with --resume."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -266,6 +368,41 @@ def main() -> int:
             conversations = sorted(subfolders)
 
         print(f"Conversations requested: {len(conversations)}")
+
+        progress_path = args.progress_file.resolve()
+        if args.clear_progress and progress_path.is_file():
+            progress_path.unlink()
+            print(f"Cleared progress file: {progress_path}")
+        progress = load_progress(progress_path)
+        progress["drive_folder_id"] = DRIVE_FOLDER_ID
+
+        if args.seed_completed_before:
+            seed_names = sorted(subfolders)
+            seeded = seed_completed_before(
+                progress,
+                progress_path,
+                seed_names,
+                args.seed_completed_before,
+            )
+            print(
+                f"Seeded {seeded} conversation(s) before "
+                f"{args.seed_completed_before!r} in {progress_path.name}"
+            )
+
+        skipped_resume = 0
+        if args.resume:
+            print(f"Mode: RESUME (progress file: {progress_path})")
+            remaining: list[str] = []
+            for name in conversations:
+                if name in progress["completed"]:
+                    print(f"Skipping {name} (already complete in progress file)")
+                    skipped_resume += 1
+                    continue
+                remaining.append(name)
+            conversations = remaining
+            if not conversations:
+                print("All requested conversations already complete.")
+                return 0
 
         reports: list[FileReport] = []
         failed_files = 0
@@ -294,9 +431,19 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     no_seglst.append(conversation)
+                    if not args.dry_run:
+                        mark_conversation_complete(
+                            progress,
+                            progress_path,
+                            conversation,
+                            files=0,
+                            note="no approved seglst files",
+                        )
                     continue
 
                 print(f"Found {len(approved)} {SEGLST_GLOB} file(s)")
+                conv_failed = 0
+                conv_ok = 0
                 for filename, file_id in approved:
                     report = process_drive_file(
                         service,
@@ -308,15 +455,27 @@ def main() -> int:
                     )
                     if report is None:
                         failed_files += 1
+                        conv_failed += 1
                     else:
                         reports.append(report)
+                        conv_ok += 1
+
+                if conv_failed == 0 and not args.dry_run:
+                    mark_conversation_complete(
+                        progress,
+                        progress_path,
+                        conversation,
+                        files=conv_ok,
+                    )
 
         conversations_processed = len({r.task_id for r in reports})
         mode = "DRY RUN" if args.dry_run else "APPLIED"
         print()
         print(f"[{mode}] Drive batch summary")
-        print(f"  Conversations requested: {len(conversations)}")
+        print(f"  Conversations requested: {len(conversations) + skipped_resume}")
         print(f"  Conversations processed: {conversations_processed}")
+        if args.resume:
+            print(f"  Skipped (already complete): {skipped_resume}")
         print(f"  Not found on Drive: {len(missing_folders)}")
         for conversation_id in missing_folders:
             print(f"    - {conversation_id}")
