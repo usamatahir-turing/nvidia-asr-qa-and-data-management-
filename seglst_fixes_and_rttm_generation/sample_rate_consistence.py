@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Resample WAV files on pre-delivery Drive to 48 kHz using ffmpeg.
+"""Make WAV sample rates consistent per conversation folder on Drive.
 
 Walks each conversation subfolder under the pre-delivery Drive root. For each
-``.wav`` file, reads only the WAV header from Drive to detect sample rate; files
-already at 48 kHz are skipped without downloading the full audio. Files at other
-rates are downloaded, resampled to 48 kHz, and uploaded back to Drive.
+folder, header-probes every ``.wav`` and chooses **44100 Hz** or **48000 Hz**
+from whichever is already more common (tie or neither present → 44100 Hz).
+Files already at the target are skipped without a full download; others are
+resampled with ffmpeg (``pcm_s16le``) and uploaded in place.
 
 Example::
 
@@ -30,7 +31,8 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 PRE_DELIVERY_DRIVE_FOLDER_ID = "1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf"
 TARGET_SERVICE_ACCOUNT = "delivery-nvidia@delivery-nvidia.iam.gserviceaccount.com"
-TARGET_SAMPLE_RATE = 48_000
+RATE_44100 = 44_100
+RATE_48000 = 48_000
 WAV_PROBE_BYTES = 4096
 WAV_SUFFIX = ".wav"
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -207,7 +209,16 @@ def probe_sample_rate(path: Path) -> int:
     return int(float(rate_str))
 
 
-def resample_wav(input_path: Path, output_path: Path) -> None:
+def choose_folder_target_rate(rates: list[int | None]) -> int:
+    """Return 44100 or 48000 from majority of known rates. Tie → 44100."""
+    n_44100 = sum(1 for rate in rates if rate == RATE_44100)
+    n_48000 = sum(1 for rate in rates if rate == RATE_48000)
+    if n_48000 > n_44100:
+        return RATE_48000
+    return RATE_44100
+
+
+def resample_wav(input_path: Path, output_path: Path, target_rate: int) -> None:
     subprocess.run(
         [
             "ffmpeg",
@@ -215,7 +226,7 @@ def resample_wav(input_path: Path, output_path: Path) -> None:
             "-i",
             str(input_path),
             "-ar",
-            str(TARGET_SAMPLE_RATE),
+            str(target_rate),
             "-c:a",
             "pcm_s16le",
             str(output_path),
@@ -232,6 +243,8 @@ def process_wav(
     filename: str,
     file_id: str,
     work_dir: Path,
+    target_rate: int,
+    old_rate: int | None,
 ) -> str:
     """Process one wav file. Returns 'converted', 'skipped', or 'failed'."""
     label = f"{conversation}/{filename}"
@@ -239,20 +252,18 @@ def process_wav(
     output_path = work_dir / "output.wav"
 
     try:
-        old_rate = probe_remote_sample_rate(service, file_id)
-
-        if old_rate == TARGET_SAMPLE_RATE:
+        if old_rate == target_rate:
             print(f"{label}: {old_rate} Hz (header check, no download)")
             return "skipped"
 
         download_drive_file(service, file_id, input_path)
         if old_rate is None:
             old_rate = probe_sample_rate(input_path)
-            if old_rate == TARGET_SAMPLE_RATE:
-                print(f"{label}: {old_rate} Hz -> {TARGET_SAMPLE_RATE} Hz (no change)")
+            if old_rate == target_rate:
+                print(f"{label}: {old_rate} Hz -> {target_rate} Hz (no change)")
                 return "skipped"
 
-        resample_wav(input_path, output_path)
+        resample_wav(input_path, output_path, target_rate)
         new_rate = probe_sample_rate(output_path)
         upload_drive_file(service, file_id, output_path)
         print(f"{label}: {old_rate} Hz -> {new_rate} Hz")
@@ -272,8 +283,8 @@ def process_wav(
 
 def main() -> int:
     print(
-        f"Resampling WAV files on pre-delivery Drive ({PRE_DELIVERY_DRIVE_FOLDER_ID}) "
-        f"to {TARGET_SAMPLE_RATE} Hz..."
+        f"Making WAV sample rates consistent on pre-delivery Drive "
+        f"({PRE_DELIVERY_DRIVE_FOLDER_ID}); per folder 44100 or 48000 Hz..."
     )
 
     try:
@@ -301,19 +312,45 @@ def main() -> int:
                     continue
 
                 print(f"\n--- {conversation} ---")
+                probed: list[tuple[str, int | None]] = []
                 for filename in wav_files:
+                    file_id = files[filename]["id"]
+                    try:
+                        rate = probe_remote_sample_rate(service, file_id)
+                    except Exception as exc:
+                        print(
+                            f"Warning: {conversation}/{filename}: "
+                            f"header probe failed ({exc})",
+                            file=sys.stderr,
+                        )
+                        rate = None
+                    probed.append((filename, rate))
+
+                rates = [rate for _, rate in probed]
+                target_rate = choose_folder_target_rate(rates)
+                n_44100 = sum(1 for rate in rates if rate == RATE_44100)
+                n_48000 = sum(1 for rate in rates if rate == RATE_48000)
+                print(
+                    f"Target {target_rate} Hz "
+                    f"(already 44100: {n_44100}, 48000: {n_48000}, "
+                    f"other/unknown: {len(rates) - n_44100 - n_48000})"
+                )
+
+                for filename, old_rate in probed:
                     result = process_wav(
                         service,
                         conversation,
                         filename,
                         files[filename]["id"],
                         work_dir,
+                        target_rate,
+                        old_rate,
                     )
                     stats[result] += 1
 
         print(
             f"\nDone. Converted: {stats['converted']} | "
-            f"Already {TARGET_SAMPLE_RATE} Hz: {stats['skipped']} | "
+            f"Already at folder target: {stats['skipped']} | "
             f"Failed: {stats['failed']}"
         )
         return 1 if stats["failed"] else 0
