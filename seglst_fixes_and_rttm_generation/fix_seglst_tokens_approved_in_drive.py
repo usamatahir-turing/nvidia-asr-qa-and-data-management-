@@ -15,6 +15,8 @@ Example::
     python fix_seglst_tokens_approved_in_drive.py NV-KO-SS03-CONVO08
     python fix_seglst_tokens_approved_in_drive.py NV-EN-SS14-CONVO34 NV-KO-SS13-CONVO30
     python fix_seglst_tokens_approved_in_drive.py --resume
+    python fix_seglst_tokens_approved_in_drive.py --batch
+    python fix_seglst_tokens_approved_in_drive.py --batch --resume
     python fix_seglst_tokens_approved_in_drive.py --seed-completed-before NV-IT-SS15-CONVO39 --resume
 """
 
@@ -47,7 +49,9 @@ TARGET_SERVICE_ACCOUNT = "delivery-nvidia@delivery-nvidia.iam.gserviceaccount.co
 FOLDER_MIME = "application/vnd.google-apps.folder"
 JSON_MIME = "application/json"
 APPROVED_SUFFIX = "_approved.seglst.json"
-DEFAULT_PROGRESS_FILE = Path(__file__).resolve().parent / "fix_approved_drive_progress.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_BATCH_FILE = SCRIPT_DIR / "batch_conversations_list.txt"
+DEFAULT_PROGRESS_FILE = SCRIPT_DIR / "fix_approved_drive_progress.json"
 
 
 def get_authenticated_drive_service():
@@ -85,6 +89,32 @@ def get_authenticated_drive_service():
     sa_token = response.json()["accessToken"]
     creds = Oauth2Credentials(sa_token)
     return build("drive", "v3", credentials=creds)
+
+
+def load_batch_folder_names(batch_path: Path) -> list[str]:
+    if not batch_path.is_file():
+        raise FileNotFoundError(f"Batch file not found: {batch_path}")
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for line_number, raw_line in enumerate(
+        batch_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in seen:
+            print(
+                f"Warning: duplicate folder on line {line_number}: {line!r}",
+                file=sys.stderr,
+            )
+            continue
+        seen.add(line)
+        names.append(line)
+
+    if not names:
+        raise ValueError(f"No folder names found in batch file: {batch_path}")
+    return names
 
 
 def list_drive_subfolders(service, parent_id: str) -> dict[str, str]:
@@ -304,8 +334,22 @@ def parse_args() -> argparse.Namespace:
         metavar="CONVERSATION",
         help=(
             "Conversation folder name(s) under the Drive root. "
-            "Defaults to all subfolders."
+            "Defaults to all subfolders unless --batch is set."
         ),
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help=(
+            "Process only conversations listed in "
+            f"{DEFAULT_BATCH_FILE.name} (or --batch-file)."
+        ),
+    )
+    parser.add_argument(
+        "--batch-file",
+        type=Path,
+        default=None,
+        help=f"Batch file used with --batch (default: {DEFAULT_BATCH_FILE.name}).",
     )
     parser.add_argument(
         "--dry-run",
@@ -349,6 +393,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    if args.batch_file is not None and not args.batch:
+        print("Error: --batch-file requires --batch.", file=sys.stderr)
+        return 1
+    if args.batch and args.conversations:
+        print(
+            "Error: pass conversation names or --batch, not both.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         f"Fixing *_approved.seglst.json files on Drive folder {DRIVE_FOLDER_ID}..."
     )
@@ -362,7 +416,15 @@ def main() -> int:
             print("Error: no conversation folders found on Drive.", file=sys.stderr)
             return 1
 
-        if args.conversations:
+        if args.batch:
+            batch_path = (
+                args.batch_file.resolve()
+                if args.batch_file is not None
+                else DEFAULT_BATCH_FILE
+            )
+            conversations = load_batch_folder_names(batch_path)
+            print(f"Batch file: {batch_path} ({len(conversations)} conversation(s))")
+        elif args.conversations:
             conversations = list(dict.fromkeys(args.conversations))
         else:
             conversations = sorted(subfolders)
