@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import os
 import sys
@@ -13,7 +15,7 @@ from googleapiclient.http import MediaFileUpload
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SOURCE_DIR = os.path.join(SCRIPT_DIR, 'output_data')
 DRIVE_DATA_ROOT = os.path.join(os.path.dirname(SCRIPT_DIR), 'drive_data')
-TARGET_DRIVE_FOLDER_ID = '1_tNysDjOd7MLThHQDlZeuzkrR9EgXxJf'
+TARGET_DRIVE_FOLDER_ID = '1K0Ys1Rn9lWji_Z74i4u7WS69J93yMSqF'
 TARGET_SERVICE_ACCOUNT = 'delivery-nvidia@delivery-nvidia.iam.gserviceaccount.com'
 
 SEGLST_SUFFIX = ".seglst.json"
@@ -108,9 +110,19 @@ def audit_task_speakers(task_name: str) -> TaskSpeakerAudit:
     return audit
 
 
-def print_task_speaker_report(task_name: str) -> None:
+def is_conversation_complete(audit: TaskSpeakerAudit) -> bool:
+    """True when at least one speaker is complete and none are missing files."""
+    return bool(audit.complete_speakers) and not (
+        audit.all_speakers - audit.complete_speakers
+    )
+
+
+def print_task_speaker_report(
+    task_name: str, audit: TaskSpeakerAudit | None = None
+) -> TaskSpeakerAudit:
     """Print speaker counts and delivery issues for a task folder."""
-    audit = audit_task_speakers(task_name)
+    if audit is None:
+        audit = audit_task_speakers(task_name)
 
     print(
         f"Speakers (complete set): {len(audit.complete_speakers)} | "
@@ -148,6 +160,33 @@ def print_task_speaker_report(task_name: str) -> None:
             f"Warning: {speaker} missing {', '.join(missing)}",
             file=sys.stderr,
         )
+
+    return audit
+
+
+def print_final_delivery_summary(audits: list[TaskSpeakerAudit]) -> None:
+    """Reprint per-conversation reports, grouped as complete vs incomplete."""
+    if not audits:
+        return
+
+    complete = [audit for audit in audits if is_conversation_complete(audit)]
+    incomplete = [audit for audit in audits if not is_conversation_complete(audit)]
+
+    print("\n=== Delivery summary ===")
+    print(f"Complete conversations: {len(complete)}")
+    print(f"Incomplete conversations: {len(incomplete)}")
+
+    if complete:
+        print("\nComplete:")
+        for audit in complete:
+            print(f"\n--- {audit.task_name} ---")
+            print_task_speaker_report(audit.task_name, audit)
+
+    if incomplete:
+        print("\nIncomplete:")
+        for audit in incomplete:
+            print(f"\n--- {audit.task_name} ---")
+            print_task_speaker_report(audit.task_name, audit)
 
 
 def get_authenticated_drive_service():
@@ -216,7 +255,13 @@ def get_drive_items(service, folder_id):
             break
     return items
 
-def upload_files_recursive(service, local_path, drive_parent_id, current_rel_path=""):
+def upload_files_recursive(
+    service,
+    local_path,
+    drive_parent_id,
+    current_rel_path="",
+    audits: list[TaskSpeakerAudit] | None = None,
+):
     """Upload local files to Drive; skip names that already exist; never delete Drive files."""
     drive_items = get_drive_items(service, drive_parent_id)
 
@@ -231,7 +276,13 @@ def upload_files_recursive(service, local_path, drive_parent_id, current_rel_pat
                 print(f"Creating folder: {item}")
                 folder_id = create_drive_folder(service, item, drive_parent_id)
 
-            upload_files_recursive(service, item_path, folder_id, os.path.join(current_rel_path, item))
+            upload_files_recursive(
+                service,
+                item_path,
+                folder_id,
+                os.path.join(current_rel_path, item),
+                audits,
+            )
 
         else:
             def sync_file(file_to_upload_path, filename):
@@ -263,7 +314,9 @@ def upload_files_recursive(service, local_path, drive_parent_id, current_rel_pat
                     print(f"Warning: Corresponding WAV not found: {wav_local_path}")
 
     if current_rel_path:
-        print_task_speaker_report(current_rel_path)
+        audit = print_task_speaker_report(current_rel_path)
+        if audits is not None:
+            audits.append(audit)
 
 
 def resolve_task_dirs(source_dir: str, task_names: list[str]) -> list[str]:
@@ -303,7 +356,13 @@ def get_or_create_drive_folder(
     return create_drive_folder(service, name, parent_id)
 
 
-def upload_task_folders(service, source_dir: str, drive_parent_id: str, task_names: list[str]):
+def upload_task_folders(
+    service,
+    source_dir: str,
+    drive_parent_id: str,
+    task_names: list[str],
+    audits: list[TaskSpeakerAudit] | None = None,
+):
     """Upload only the selected task folders into the target Drive folder."""
     drive_items = get_drive_items(service, drive_parent_id)
 
@@ -311,7 +370,7 @@ def upload_task_folders(service, source_dir: str, drive_parent_id: str, task_nam
         local_path = os.path.join(source_dir, task_name)
         print(f"\n--- {task_name} ---")
         folder_id = get_or_create_drive_folder(service, task_name, drive_parent_id, drive_items)
-        upload_files_recursive(service, local_path, folder_id, task_name)
+        upload_files_recursive(service, local_path, folder_id, task_name, audits)
 
 
 def parse_args() -> argparse.Namespace:
@@ -361,12 +420,18 @@ def main() -> int:
             )
         print("Tasks:", ", ".join(task_names))
 
+        audits: list[TaskSpeakerAudit] = []
         if args.tasks:
-            upload_task_folders(drive_service, SOURCE_DIR, TARGET_DRIVE_FOLDER_ID, task_names)
+            upload_task_folders(
+                drive_service, SOURCE_DIR, TARGET_DRIVE_FOLDER_ID, task_names, audits
+            )
         else:
-            upload_files_recursive(drive_service, SOURCE_DIR, TARGET_DRIVE_FOLDER_ID, "")
+            upload_files_recursive(
+                drive_service, SOURCE_DIR, TARGET_DRIVE_FOLDER_ID, "", audits
+            )
 
         print("Upload complete!")
+        print_final_delivery_summary(audits)
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         return 1
